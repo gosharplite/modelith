@@ -429,6 +429,11 @@ func escapePath(p string) string {
 
 // --- Azure DevOps transport (az rest) ---
 
+// adoResourceID is the Azure DevOps application ID that az rest needs to
+// request an AAD token with the correct audience when the URL alone doesn't
+// let it derive one.
+const adoResourceID = "499b84ac-1321-427f-aa17-267ca6975798"
+
 // adoVersionType returns the versionDescriptor.versionType for a Source. When
 // the version prefix was not one of the known three (GB/GT/GC), the API
 // endpoint accepts an empty versionType and auto-detects the ref.
@@ -452,7 +457,8 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 		uri += "&versionDescriptor.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri)
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +477,8 @@ func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, err
 		uri += "&searchCriteria.itemVersion.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri,
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri,
 		"--query", "value[0].commitId", "-o", "tsv")
 	if err != nil {
 		return "", err

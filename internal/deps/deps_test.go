@@ -56,11 +56,18 @@ func (f *fakeRunner) runGh(args []string) ([]byte, error) {
 }
 
 func (f *fakeRunner) runAz(args []string) ([]byte, error) {
-	var uri string
+	var uri, resource string
 	for i, a := range args {
 		if a == "--uri" && i+1 < len(args) {
 			uri = args[i+1]
 		}
+		if a == "--resource" && i+1 < len(args) {
+			resource = args[i+1]
+		}
+	}
+	// The ADO resource ID must be present.
+	if resource != "499b84ac-1321-427f-aa17-267ca6975798" {
+		return nil, fmt.Errorf("az: expected --resource 499b84ac-1321-427f-aa17-267ca6975798, got %q", resource)
 	}
 	if f.fail != "" && strings.Contains(uri, f.fail) {
 		return nil, fmt.Errorf("az: HTTP 404: Not Found (%s)", uri)
@@ -783,28 +790,31 @@ func TestImport_ADO_CallsAzWithTheExpectedEndpoints(t *testing.T) {
 	if len(r.calls) != 2 {
 		t.Fatalf("want 2 az calls, got %d: %+v", len(r.calls), r.calls)
 	}
-	if name := r.calls[0][0]; name != "az" {
-		t.Errorf("call 0 is %q, want az", name)
-	}
-	// Find the --uri argument in each call.
-	var foundContent, foundCommit bool
+	// Find the --uri and --resource arguments in each call.
+	var foundContent, foundCommit, foundResource int
 	for _, call := range r.calls {
 		for i, a := range call {
+			if a == "--resource" && i+1 < len(call) && call[i+1] == adoResourceID {
+				foundResource++
+			}
 			if a == "--uri" && i+1 < len(call) {
 				uri := call[i+1]
 				if strings.Contains(uri, "/items") {
-					foundContent = true
+					foundContent++
 				}
 				if strings.Contains(uri, "/commits") {
-					foundCommit = true
+					foundCommit++
 				}
 			}
 		}
 	}
-	if !foundContent {
+	if foundResource != 2 {
+		t.Errorf("want 2 --resource flags, got %d", foundResource)
+	}
+	if foundContent == 0 {
 		t.Error("no az rest call with /items endpoint")
 	}
-	if !foundCommit {
+	if foundCommit == 0 {
 		t.Error("no az rest call with /commits endpoint")
 	}
 }
