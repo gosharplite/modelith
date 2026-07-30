@@ -33,25 +33,20 @@ type Runner interface {
 type ExecRunner struct{}
 
 // Run executes name with args and returns its standard output. Standard error
-// is folded into the returned error, because gh reports why it refused there.
+// is folded into the returned error, because the CLI reports why it refused there.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	// nolint:gosec // G204 flags a variable command and arguments, which is
-	// what a transport seam is. The command is the literal "gh" at both call
-	// sites; the arguments are literals plus an endpoint assembled from a URL
-	// that ParseSource has already validated, with each path segment and query
-	// value escaped and traversal segments rejected outright (escaping a
-	// segment cannot neutralise a segment that *is* a traversal, so ParseSource
-	// refuses those rather than passing them on). Nothing here comes from a
-	// model file, and there is no
-	// shell: exec passes an argv array, so a metacharacter is a byte in an
-	// argument rather than syntax (ADR-0010).
+	// what a transport seam is. The commands are the literals "gh" and "az" at
+	// the call sites; the arguments are literals plus endpoints assembled from
+	// URLs that ParseSource has already validated. Nothing here comes from a
+	// model file, and there is no shell: exec passes an argv array.
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("%s is not installed — modelith delegates fetching to it; install it from https://cli.github.com and run `%s auth login`", name, name)
+			return nil, fmt.Errorf("%s is not installed — modelith delegates fetching to it%s", name, installHint(name))
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
@@ -59,6 +54,17 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return out, nil
+}
+
+// installHint returns the rest of the "not installed" message for a given CLI.
+func installHint(name string) string {
+	switch name {
+	case "gh":
+		return "; install it from https://cli.github.com and run `gh auth login`"
+	case "az":
+		return "; install it from https://aka.ms/azure-cli and run `az login`"
+	}
+	return ""
 }
 
 // Source is a model file in another repository, as an origin URL parsed into
@@ -69,6 +75,7 @@ type Source struct {
 	Project string // ADO project; empty for GitHub
 	Repo    string
 	Ref     string
+	RefType string // ADO version type: "branch", "tag", or "commit"; empty for GitHub
 	Path    string // path within the repository
 }
 
@@ -160,14 +167,15 @@ func parseADOSource(u *url.URL, ref string) (Source, error) {
 	}
 
 	version := q.Get("version")
-	var urlRef string
-	if strings.HasPrefix(version, "GB") {
-		urlRef = version[2:] // Git Branch
-	} else if strings.HasPrefix(version, "GT") {
-		urlRef = version[2:] // Git Tag
-	} else if strings.HasPrefix(version, "GC") {
-		urlRef = version[2:] // Git Commit
-	} else if version != "" {
+	var urlRef, refType string
+	switch {
+	case strings.HasPrefix(version, "GB"):
+		urlRef, refType = version[2:], "branch"
+	case strings.HasPrefix(version, "GT"):
+		urlRef, refType = version[2:], "tag"
+	case strings.HasPrefix(version, "GC"):
+		urlRef, refType = version[2:], "commit"
+	case version != "":
 		urlRef = version
 	}
 
@@ -178,6 +186,7 @@ func parseADOSource(u *url.URL, ref string) (Source, error) {
 		Origin:  "https://dev.azure.com/" + parts[0] + "/" + parts[1] + "/_git/" + parts[3],
 		Path:    filePath,
 		Ref:     urlRef,
+		RefType: refType,
 	}
 	if ref != "" {
 		src.Ref = ref
@@ -420,14 +429,28 @@ func escapePath(p string) string {
 
 // --- Azure DevOps transport (az rest) ---
 
+// adoVersionType returns the versionDescriptor.versionType for a Source. When
+// the version prefix was not one of the known three (GB/GT/GC), the API
+// endpoint accepts an empty versionType and auto-detects the ref.
+func adoVersionType(src Source) string {
+	switch src.RefType {
+	case "branch", "tag", "commit":
+		return src.RefType
+	}
+	return ""
+}
+
 // fetchContentADO fetches the file content from Azure DevOps by delegating to
 // `az rest`. Auth is handled by the az CLI.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
 	uri := fmt.Sprintf(
-		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&versionDescriptor.versionType=branch&api-version=7.1",
+		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",
 		url.PathEscape(src.Owner), url.PathEscape(src.Project),
 		url.PathEscape(src.Repo), url.QueryEscape(src.Path),
 		url.QueryEscape(src.Ref))
+	if vt := adoVersionType(src); vt != "" {
+		uri += "&versionDescriptor.versionType=" + url.QueryEscape(vt)
+	}
 
 	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri)
 	if err != nil {
@@ -439,12 +462,14 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 // fetchCommitADO returns the commit that last touched the file at the given
 // ref by delegating to `az rest`. Auth is handled by the az CLI.
 func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, error) {
-	// $top must be shell-escaped so the shell does not expand it as a variable.
 	uri := fmt.Sprintf(
-		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/commits?searchCriteria.itemPath=%s&searchCriteria.itemVersion.version=%s&searchCriteria.itemVersion.versionType=branch&\\$top=1&api-version=7.1",
+		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/commits?searchCriteria.itemPath=%s&searchCriteria.itemVersion.version=%s&$top=1&api-version=7.1",
 		url.PathEscape(src.Owner), url.PathEscape(src.Project),
 		url.PathEscape(src.Repo), url.QueryEscape(src.Path),
 		url.QueryEscape(src.Ref))
+	if vt := adoVersionType(src); vt != "" {
+		uri += "&searchCriteria.itemVersion.versionType=" + url.QueryEscape(vt)
+	}
 
 	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri,
 		"--query", "value[0].commitId", "-o", "tsv")

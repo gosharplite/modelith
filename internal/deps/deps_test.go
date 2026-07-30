@@ -67,9 +67,22 @@ func (f *fakeRunner) runAz(args []string) ([]byte, error) {
 	}
 	switch {
 	case strings.Contains(uri, "/items"):
+		// Validate that a known version prefix produces the right versionType.
+		// GB→branch, GT→tag, GC→commit. When the prefix is absent or unknown,
+		// versionType is omitted (the API auto-detects).
+		if strings.Contains(uri, "versionType") {
+			if !strings.Contains(uri, "versionType=branch") &&
+				!strings.Contains(uri, "versionType=tag") &&
+				!strings.Contains(uri, "versionType=commit") {
+				return nil, fmt.Errorf("az: unexpected versionType in %q", uri)
+			}
+		}
 		return []byte(f.content), nil
 	case strings.Contains(uri, "/commits"):
-		// --query value[0].commitId -o tsv extracts the sha.
+		// The commit endpoint must not shell-escape $top.
+		if strings.Contains(uri, "\\$top") {
+			return nil, fmt.Errorf("az: $top is shell-escaped, but ExecRunner uses argv (no shell)")
+		}
 		return []byte(f.sha + "\n"), nil
 	}
 	return nil, fmt.Errorf("az: unexpected uri %q", uri)
@@ -617,6 +630,7 @@ func TestParseSource_ADO(t *testing.T) {
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     "main",
+				RefType: "branch",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -630,6 +644,7 @@ func TestParseSource_ADO(t *testing.T) {
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     "release/v2",
+				RefType: "branch",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -642,6 +657,7 @@ func TestParseSource_ADO(t *testing.T) {
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     "v1.0.0",
+				RefType: "tag",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -654,6 +670,7 @@ func TestParseSource_ADO(t *testing.T) {
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     adoCommit,
+				RefType: "commit",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -666,6 +683,7 @@ func TestParseSource_ADO(t *testing.T) {
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     "main",
+				RefType: "branch",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -788,6 +806,53 @@ func TestImport_ADO_CallsAzWithTheExpectedEndpoints(t *testing.T) {
 	}
 	if !foundCommit {
 		t.Error("no az rest call with /commits endpoint")
+	}
+}
+
+// TestImport_ADO_TagUsesVersionTypeTag pins that a GT (tag) URL produces
+// versionType=tag in the API call, not the hardcoded "branch".
+func TestImport_ADO_TagUsesVersionTypeTag(t *testing.T) {
+	t.Parallel()
+
+	r := adoRunner(adoContent, adoCommit)
+	tagURL := "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GTv1.0.0"
+	if _, err := importAdoInto(t, t.TempDir(), r, tagURL); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range r.calls {
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=tag") {
+					t.Errorf("tag URL should produce versionType=tag, got %q", uri)
+				}
+				if strings.Contains(uri, "/commits") && !strings.Contains(uri, "versionType=tag") {
+					t.Errorf("tag URL should produce versionType=tag in commits call, got %q", uri)
+				}
+			}
+		}
+	}
+}
+
+// TestImport_ADO_CommitUsesVersionTypeCommit pins that a GC (commit) URL
+// produces versionType=commit in the API call.
+func TestImport_ADO_CommitUsesVersionTypeCommit(t *testing.T) {
+	t.Parallel()
+
+	r := adoRunner(adoContent, adoCommit)
+	commitURL := "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GC" + adoCommit
+	if _, err := importAdoInto(t, t.TempDir(), r, commitURL); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range r.calls {
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=commit") {
+					t.Errorf("commit URL should produce versionType=commit, got %q", uri)
+				}
+			}
+		}
 	}
 }
 
