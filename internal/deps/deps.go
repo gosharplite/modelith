@@ -1,8 +1,8 @@
 // Package deps acquires a model from another repository and stamps it as a
 // vendored copy.
 //
-// It implements no network transport of its own. Every fetch is delegated to
-// the gh CLI, executed as an argv array and never through a shell, so this
+// Every fetch is delegated to an external CLI — gh for GitHub, az for Azure
+// DevOps — executed as an argv array and never through a shell, so this
 // binary holds no TLS configuration and no credentials (ADR-0011).
 package deps
 
@@ -64,50 +64,51 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 // Source is a model file in another repository, as an origin URL parsed into
 // the parts a fetch and a later refresh both need.
 type Source struct {
-	Origin string // https://github.com/owner/repo
-	Owner  string
-	Repo   string
-	Ref    string
-	Path   string // path within the repository
+	Origin  string // https://github.com/owner/repo or https://dev.azure.com/org/project/_git/repo
+	Owner   string // GitHub owner, or ADO organization
+	Project string // ADO project; empty for GitHub
+	Repo    string
+	Ref     string
+	Path    string // path within the repository
 }
 
-// ParseSource reads a GitHub blob URL — the address of the file as it appears
-// in a browser — into its parts. A non-empty ref overrides the one in the URL,
-// and when it is the ref the URL names, it is also what disambiguates a branch
-// whose name contains a slash from the path that follows it. It cannot do both
-// at once: overriding with a *different* ref leaves the split to be taken at the
-// first segment, which splitHint explains when the fetch that follows fails.
+// ParseSource reads a GitHub or Azure DevOps blob URL — the address of the file
+// as it appears in a browser — into its parts. A non-empty ref overrides the
+// one in the URL.
 func ParseSource(raw, ref string) (Source, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return Source{}, fmt.Errorf("%q is not a URL: %w", raw, err)
 	}
-	// A host is case-insensitive, and a browser hands back the "www." form as
-	// readily as the bare one; neither is a different site.
-	if host := strings.TrimPrefix(strings.ToLower(u.Host), "www."); host != "github.com" {
+	host := strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+
+	switch host {
+	case "github.com":
+		return parseGitHubSource(u, ref)
+	case "dev.azure.com":
+		return parseADOSource(u, ref)
+	default:
 		return Source{}, fmt.Errorf(
-			"modelith can currently fetch only from github.com, and %q is on %q. Support for other hosts is not written yet because nobody has needed it — if you do, please open an issue at %s saying where your models live",
+			"modelith can currently fetch only from github.com and dev.azure.com, and %q is on %q. Support for other hosts is not written yet because nobody has needed it — if you do, please open an issue at %s saying where your models live",
 			raw, u.Host, issuesURL)
 	}
-	// A URL copied from the browser often carries ?plain=1 and a #L12 anchor.
-	// Neither is part of the file's address.
+}
+
+// parseGitHubSource parses a GitHub blob URL:
+//
+//	https://github.com/<owner>/<repo>/blob/<ref>/<path>
+func parseGitHubSource(u *url.URL, ref string) (Source, error) {
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 5 || parts[2] != "blob" {
 		return Source{}, fmt.Errorf(
 			"%q is not a GitHub file URL — it should look like https://github.com/<owner>/<repo>/blob/<ref>/<path to the .modelith.yaml>, which is the address you get by opening the file on github.com",
-			raw)
+			u.String())
 	}
-	// A dot segment or an empty one is not part of any address github.com
-	// serves, and url.Parse does not remove one. It has to be rejected here
-	// rather than escaped later: escapePath escapes the characters within a
-	// segment, which leaves a segment that *is* a traversal exactly as it was,
-	// and the endpoint fetchContent builds would then leave the repository's
-	// contents namespace.
 	for _, p := range parts {
 		if p == "" || p == "." || p == ".." {
 			return Source{}, fmt.Errorf(
 				"%q has a %q path segment, which is not part of a file's address on github.com — copy the address bar from the file's page rather than assembling the URL by hand",
-				raw, p)
+				u.String(), p)
 		}
 	}
 	src := Source{
@@ -116,9 +117,6 @@ func ParseSource(raw, ref string) (Source, error) {
 		Origin: "https://github.com/" + parts[0] + "/" + parts[1],
 	}
 	rest := strings.Join(parts[3:], "/")
-	// A ref may contain slashes ("release/v2"), and the URL gives no way to tell
-	// where it ends. Splitting at the first segment is right for the common
-	// case; an explicit ref settles the rest.
 	switch {
 	case ref != "" && strings.HasPrefix(rest, ref+"/"):
 		src.Ref, src.Path = ref, strings.TrimPrefix(rest, ref+"/")
@@ -129,7 +127,60 @@ func ParseSource(raw, ref string) (Source, error) {
 		}
 	}
 	if src.Path == "" {
-		return Source{}, fmt.Errorf("%q names no file inside the repository", raw)
+		return Source{}, fmt.Errorf("%q names no file inside the repository", u.String())
+	}
+	return src, nil
+}
+
+// parseADOSource parses an Azure DevOps blob URL:
+//
+//	https://dev.azure.com/<org>/<project>/_git/<repo>?path=<path>&version=GB<branch>
+//
+// The version parameter prefix indicates: GB=GitBranch, GT=GitTag, GC=GitCommit.
+func parseADOSource(u *url.URL, ref string) (Source, error) {
+	// Path: /<org>/<project>/_git/<repo>
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 || parts[2] != "_git" {
+		return Source{}, fmt.Errorf(
+			"%q is not an Azure DevOps file URL — it should look like https://dev.azure.com/<org>/<project>/_git/<repo>?path=<path>&version=GB<branch>, which is the address you get by opening the file on dev.azure.com",
+			u.String())
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return Source{}, fmt.Errorf(
+				"%q has a %q path segment, which is not part of a file's address on dev.azure.com — copy the address bar from the file's page rather than assembling the URL by hand",
+				u.String(), p)
+		}
+	}
+
+	q := u.Query()
+	filePath := q.Get("path")
+	if filePath == "" {
+		return Source{}, fmt.Errorf("%q names no file inside the repository — it needs a ?path= query parameter", u.String())
+	}
+
+	version := q.Get("version")
+	var urlRef string
+	if strings.HasPrefix(version, "GB") {
+		urlRef = version[2:] // Git Branch
+	} else if strings.HasPrefix(version, "GT") {
+		urlRef = version[2:] // Git Tag
+	} else if strings.HasPrefix(version, "GC") {
+		urlRef = version[2:] // Git Commit
+	} else if version != "" {
+		urlRef = version
+	}
+
+	src := Source{
+		Owner:   parts[0],
+		Project: parts[1],
+		Repo:    parts[3],
+		Origin:  "https://dev.azure.com/" + parts[0] + "/" + parts[1] + "/_git/" + parts[3],
+		Path:    filePath,
+		Ref:     urlRef,
+	}
+	if ref != "" {
+		src.Ref = ref
 	}
 	return src, nil
 }
@@ -138,7 +189,7 @@ const issuesURL = "https://github.com/stacklok/modelith/issues"
 
 // Options are the inputs to Import.
 type Options struct {
-	// URL is the GitHub blob URL of the model to vendor.
+	// URL is the GitHub or Azure DevOps blob URL of the model to vendor.
 	URL string
 	// Dir is the directory to write into. Empty means the working directory.
 	Dir string
@@ -182,10 +233,28 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 		runner = ExecRunner{}
 	}
 
-	content, err := fetchContent(ctx, runner, src)
-	if err != nil {
-		return nil, fmt.Errorf("%w%s", err, splitHint(src, err))
+	var content []byte
+	var commit string
+
+	if src.Project != "" {
+		// ADO fetch delegates to the az CLI.
+		content, err = fetchContentADO(ctx, runner, src)
+		if err != nil {
+			return nil, fmt.Errorf("%w%s", err, splitHint(src, err))
+		}
+		commit, err = fetchCommitADO(ctx, runner, src)
+	} else {
+		// GitHub fetch delegates to the gh CLI.
+		content, err = fetchContent(ctx, runner, src)
+		if err != nil {
+			return nil, fmt.Errorf("%w%s", err, splitHint(src, err))
+		}
+		commit, err = fetchCommit(ctx, runner, src)
 	}
+	if err != nil {
+		return nil, err
+	}
+
 	if provenance.Present(content) {
 		return nil, fmt.Errorf(
 			"%s carries a %s line, so modelith reads it as somebody else's copy rather than a model's home. If it is a copy, vendor it from the origin its header names instead, so this repository tracks the model's home. If it is not — the line is an ordinary comment that happens to use modelith's reserved prefix at column zero — it has to be indented or removed at the origin before this file can be vendored",
@@ -203,11 +272,6 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 			declares = "declares no kind"
 		}
 		return nil, fmt.Errorf("%s is not a domain model — it %s, not \"DomainModel\"", opts.URL, declares)
-	}
-
-	commit, err := fetchCommit(ctx, runner, src)
-	if err != nil {
-		return nil, err
 	}
 
 	h := &provenance.Header{
@@ -285,17 +349,18 @@ func guardTarget(target string, src Source) (replaced bool, err error) {
 }
 
 // splitHint explains the one way ParseSource can be wrong about a URL it
-// accepted. A browse URL gives no way to tell where a ref containing a slash
-// ends and the path begins, so the split is taken at the first segment; a failed
-// fetch is where that guess surfaces, as a 404 that looks like the file is
-// simply not there.
+// accepted. A GitHub browse URL gives no way to tell where a ref containing a
+// slash ends and the path begins, so the split is taken at the first segment;
+// a failed fetch is where that guess surfaces, as a 404. ADO URLs carry the
+// ref in a query parameter, so this ambiguity does not arise.
 //
-// It is offered only for that failure. A missing gh, a rejected credential, an
-// unreachable network — none of those say anything about the URL, and adding a
-// paragraph about ref splitting to them would send the reader after the wrong
-// problem. A single-segment path had nothing to lose to the ref, so it gets no
-// hint either.
+// It is offered only for that failure. A missing tool, a rejected credential,
+// an unreachable network — none of those say anything about the URL.
 func splitHint(src Source, err error) string {
+	// The ref/path ambiguity is GitHub-specific; ADO URLs use query params.
+	if src.Project != "" {
+		return ""
+	}
 	if !strings.Contains(src.Path, "/") || !isNotFound(err) {
 		return ""
 	}
@@ -304,11 +369,7 @@ func splitHint(src Source, err error) string {
 		src.Ref, src.Path)
 }
 
-// isNotFound reports whether err is gh saying the endpoint does not exist.
-//
-// It matches gh's text because gh is a separate program: it reports the status
-// on stderr and exits 1, so there is no typed error to unwrap. Reading it wrong
-// costs a hint that should not have printed, or one that should have.
+// isNotFound reports whether err says the endpoint does not exist.
 func isNotFound(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "404") || strings.Contains(msg, "Not Found")
@@ -355,4 +416,45 @@ func escapePath(p string) string {
 		segments[i] = url.PathEscape(s)
 	}
 	return strings.Join(segments, "/")
+}
+
+// --- Azure DevOps transport (az rest) ---
+
+// fetchContentADO fetches the file content from Azure DevOps by delegating to
+// `az rest`. Auth is handled by the az CLI.
+func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
+	uri := fmt.Sprintf(
+		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&versionDescriptor.versionType=branch&api-version=7.1",
+		url.PathEscape(src.Owner), url.PathEscape(src.Project),
+		url.PathEscape(src.Repo), url.QueryEscape(src.Path),
+		url.QueryEscape(src.Ref))
+
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// fetchCommitADO returns the commit that last touched the file at the given
+// ref by delegating to `az rest`. Auth is handled by the az CLI.
+func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, error) {
+	// $top must be shell-escaped so the shell does not expand it as a variable.
+	uri := fmt.Sprintf(
+		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/commits?searchCriteria.itemPath=%s&searchCriteria.itemVersion.version=%s&searchCriteria.itemVersion.versionType=branch&\\$top=1&api-version=7.1",
+		url.PathEscape(src.Owner), url.PathEscape(src.Project),
+		url.PathEscape(src.Repo), url.QueryEscape(src.Path),
+		url.QueryEscape(src.Ref))
+
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get", "--uri", uri,
+		"--query", "value[0].commitId", "-o", "tsv")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(string(out))
+	if sha == "" {
+		return "", fmt.Errorf("%s/%s/_git/%s has no commit touching %q at %q",
+			src.Owner, src.Project, src.Repo, src.Path, src.Ref)
+	}
+	return sha, nil
 }

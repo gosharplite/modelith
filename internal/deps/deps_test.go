@@ -12,11 +12,10 @@ import (
 	"github.com/stacklok/modelith/internal/provenance"
 )
 
-// fakeRunner answers the gh calls Import makes from a map keyed by the API
-// endpoint. A hand-written fake rather than a mock: it behaves like gh,
-// answering the two endpoints it knows and failing the way gh fails on
-// anything else, so a test cannot accidentally assert a response the real
-// command could never produce.
+// fakeRunner answers the gh/az calls Import makes. It behaves like gh or az,
+// answering the endpoints it knows and failing the way they fail on anything
+// else, so a test cannot accidentally assert a response the real command could
+// never produce.
 type fakeRunner struct {
 	content string
 	sha     string
@@ -24,10 +23,20 @@ type fakeRunner struct {
 	calls [][]string
 	// fail, when set, is returned for any call whose endpoint contains it.
 	fail string
+	// ado sets whether to answer as az rest (ADO) instead of gh api.
+	ado bool
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
+
+	if f.ado {
+		return f.runAz(args)
+	}
+	return f.runGh(args)
+}
+
+func (f *fakeRunner) runGh(args []string) ([]byte, error) {
 	endpoint := args[len(args)-1]
 	for _, a := range args {
 		if strings.HasPrefix(a, "repos/") {
@@ -44,6 +53,26 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 		return []byte(f.sha + "\n"), nil
 	}
 	return nil, fmt.Errorf("gh: unexpected endpoint %q", endpoint)
+}
+
+func (f *fakeRunner) runAz(args []string) ([]byte, error) {
+	var uri string
+	for i, a := range args {
+		if a == "--uri" && i+1 < len(args) {
+			uri = args[i+1]
+		}
+	}
+	if f.fail != "" && strings.Contains(uri, f.fail) {
+		return nil, fmt.Errorf("az: HTTP 404: Not Found (%s)", uri)
+	}
+	switch {
+	case strings.Contains(uri, "/items"):
+		return []byte(f.content), nil
+	case strings.Contains(uri, "/commits"):
+		// --query value[0].commitId -o tsv extracts the sha.
+		return []byte(f.sha + "\n"), nil
+	}
+	return nil, fmt.Errorf("az: unexpected uri %q", uri)
 }
 
 const upstream = `# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
@@ -536,5 +565,291 @@ func TestImport_ReplacesAnEarlierCopy(t *testing.T) {
 	}
 	if strings.Count(string(written), provenance.LinePrefix+"origin:") != 1 {
 		t.Error("the replaced copy carries more than one header")
+	}
+}
+
+// --- Azure DevOps tests ---
+
+const adoBlobURL = "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain"
+
+const adoContent = `# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
+kind: DomainModel
+version: v1
+title: Payments
+enums:
+  PaymentMethod:
+    values:
+      - name: card
+`
+
+const adoCommit = "4f2c1e9c8b3ad0e5f71b2c9a6d4e8f30ab5c7d21"
+
+func adoRunner(content, sha string) *fakeRunner {
+	return &fakeRunner{content: content, sha: sha, ado: true}
+}
+
+func importAdoInto(t *testing.T, dir string, r *fakeRunner, url string) (*Result, error) {
+	t.Helper()
+	return Import(context.Background(), Options{
+		URL: url,
+		Dir: dir,
+		Now: time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run: r,
+	})
+}
+
+func TestParseSource_ADO(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		raw     string
+		ref     string
+		want    Source
+		wantErr string
+	}{
+		{
+			name: "a browser ADO blob URL with GB branch",
+			raw:  adoBlobURL,
+			want: Source{
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "main",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name: "an explicit ref overrides the one in the URL",
+			raw:  adoBlobURL,
+			ref:  "release/v2",
+			want: Source{
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "release/v2",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name: "GT tag prefix",
+			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GTv1.0.0",
+			want: Source{
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "v1.0.0",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name: "GC commit prefix",
+			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GC" + adoCommit,
+			want: Source{
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     adoCommit,
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name: "an anchor is stripped",
+			raw:  adoBlobURL + "&_a=contents",
+			want: Source{
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "main",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name:    "no path query parameter",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?version=GBmain",
+			wantErr: "names no file inside the repository",
+		},
+		{
+			name:    "not a _git URL",
+			raw:     "https://dev.azure.com/myorg/myproject/_wiki/wikis",
+			wantErr: "not an Azure DevOps file URL",
+		},
+		{
+			name:    "a traversal segment is rejected",
+			raw:     "https://dev.azure.com/myorg/../_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain",
+			wantErr: `has a ".." path segment`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseSource(tc.raw, tc.ref)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want an error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("ParseSource() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestImport_ADO_StampsAVerifiableCopy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	r := adoRunner(adoContent, adoCommit)
+	res, err := importAdoInto(t, dir, r, adoBlobURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	written, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := res.Path, filepath.Join(dir, "payments.modelith.yaml"); got != want {
+		t.Errorf("wrote %s, want %s", got, want)
+	}
+	if res.Replaced {
+		t.Error("reported replacing a file that did not exist")
+	}
+
+	h, problems := provenance.Parse(written)
+	if len(problems) != 0 {
+		t.Fatalf("the stamped copy has header problems: %+v", problems)
+	}
+	want := provenance.Header{
+		Vendored: provenance.Banner,
+		Fetch:    "git",
+		Origin:   "https://dev.azure.com/myorg/myproject/_git/myrepo",
+		Path:     "docs/payments.modelith.yaml",
+		Ref:      "main",
+		Commit:   adoCommit,
+		Imported: "2026-07-27",
+		Digest:   provenance.Digest([]byte(adoContent)),
+	}
+	if *h != want {
+		t.Errorf("stamped header = %+v, want %+v", *h, want)
+	}
+	if ok, got := h.Verify(written); !ok {
+		t.Errorf("the freshly written copy does not verify: computed %s", got)
+	}
+
+	if !strings.HasPrefix(string(written), "# yaml-language-server:") {
+		t.Error("the editor directive is no longer the first line")
+	}
+	if !strings.Contains(string(written), "  PaymentMethod:\n") {
+		t.Error("the model content did not survive the stamp")
+	}
+}
+
+func TestImport_ADO_CallsAzWithTheExpectedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	r := adoRunner(adoContent, adoCommit)
+	if _, err := importAdoInto(t, t.TempDir(), r, adoBlobURL); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("want 2 az calls, got %d: %+v", len(r.calls), r.calls)
+	}
+	if name := r.calls[0][0]; name != "az" {
+		t.Errorf("call 0 is %q, want az", name)
+	}
+	// Find the --uri argument in each call.
+	var foundContent, foundCommit bool
+	for _, call := range r.calls {
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") {
+					foundContent = true
+				}
+				if strings.Contains(uri, "/commits") {
+					foundCommit = true
+				}
+			}
+		}
+	}
+	if !foundContent {
+		t.Error("no az rest call with /items endpoint")
+	}
+	if !foundCommit {
+		t.Error("no az rest call with /commits endpoint")
+	}
+}
+
+func TestImport_ADO_RejectsAlreadyVendored(t *testing.T) {
+	t.Parallel()
+
+	r := adoRunner("# modelith-origin: https://dev.azure.com/other/proj/_git/repo\n"+adoContent, adoCommit)
+	_, err := importAdoInto(t, t.TempDir(), r, adoBlobURL)
+	if err == nil || !strings.Contains(err.Error(), "reads it as somebody else's copy") {
+		t.Fatalf("want 'reads it as somebody else's copy', got %v", err)
+	}
+}
+
+func TestImport_ADO_Rejections(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		runner  *fakeRunner
+		url     string
+		wantErr string
+	}{
+		{
+			name:    "a file that is not a domain model",
+			runner:  adoRunner("kind: SomethingElse\nversion: v1\n", adoCommit),
+			url:     adoBlobURL,
+			wantErr: `it declares kind "SomethingElse"`,
+		},
+		{
+			name:    "a file with no kind at all",
+			runner:  adoRunner("title: Payments\n", adoCommit),
+			url:     adoBlobURL,
+			wantErr: "it declares no kind",
+		},
+		{
+			name:    "az refusing the fetch",
+			runner:  &fakeRunner{content: adoContent, sha: adoCommit, ado: true, fail: "/items"},
+			url:     adoBlobURL,
+			wantErr: "HTTP 404",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			_, err := importAdoInto(t, dir, tc.runner, tc.url)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want an error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestSplitHint_ADO(t *testing.T) {
+	t.Parallel()
+
+	src := Source{
+		Project: "myproject",
+		Ref:     "main",
+		Path:    "docs/payments.modelith.yaml",
+	}
+	if got := splitHint(src, fmt.Errorf("HTTP 404: Not Found")); got != "" {
+		t.Errorf("splitHint for ADO source should be empty, got %q", got)
 	}
 }
