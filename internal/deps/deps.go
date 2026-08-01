@@ -23,6 +23,14 @@ import (
 	"github.com/stacklok/modelith/internal/provenance"
 )
 
+// Host identifies the source-code platform a Source was parsed from.
+type Host string
+
+const (
+	HostGitHub Host = "github"
+	HostADO    Host = "azure-devops"
+)
+
 // Runner runs an external command and returns its standard output. It is the
 // seam the gh calls go through, so Import is testable without a network.
 type Runner interface {
@@ -70,6 +78,7 @@ func installHint(name string) string {
 // Source is a model file in another repository, as an origin URL parsed into
 // the parts a fetch and a later refresh both need.
 type Source struct {
+	Host    Host   // HostGitHub or HostADO
 	Origin  string // https://github.com/owner/repo or https://dev.azure.com/org/project/_git/repo
 	Owner   string // GitHub owner, or ADO organization
 	Project string // ADO project; empty for GitHub
@@ -119,6 +128,7 @@ func parseGitHubSource(u *url.URL, ref string) (Source, error) {
 		}
 	}
 	src := Source{
+		Host:   HostGitHub,
 		Owner:  parts[0],
 		Repo:   parts[1],
 		Origin: "https://github.com/" + parts[0] + "/" + parts[1],
@@ -180,6 +190,7 @@ func parseADOSource(u *url.URL, ref string) (Source, error) {
 	}
 
 	src := Source{
+		Host:    HostADO,
 		Owner:   parts[0],
 		Project: parts[1],
 		Repo:    parts[3],
@@ -190,6 +201,12 @@ func parseADOSource(u *url.URL, ref string) (Source, error) {
 	}
 	if ref != "" {
 		src.Ref = ref
+		src.RefType = "" // let the ADO API auto-detect the ref type
+	}
+	if src.Ref == "" {
+		return Source{}, fmt.Errorf(
+			"%q has no version parameter — add &version=GB<branch> to the URL, or pass --ref to pin a specific ref",
+			u.String())
 	}
 	return src, nil
 }
@@ -245,7 +262,7 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 	var content []byte
 	var commit string
 
-	if src.Project != "" {
+	if src.Host == HostADO {
 		// ADO fetch delegates to the az CLI.
 		content, err = fetchContentADO(ctx, runner, src)
 		if err != nil {
@@ -367,7 +384,7 @@ func guardTarget(target string, src Source) (replaced bool, err error) {
 // an unreachable network — none of those say anything about the URL.
 func splitHint(src Source, err error) string {
 	// The ref/path ambiguity is GitHub-specific; ADO URLs use query params.
-	if src.Project != "" {
+	if src.Host == HostADO {
 		return ""
 	}
 	if !strings.Contains(src.Path, "/") || !isNotFound(err) {

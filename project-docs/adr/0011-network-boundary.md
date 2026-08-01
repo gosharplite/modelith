@@ -38,10 +38,11 @@ both worlds â€” verifying a local file versus asking whether its origin moved â€
 the offline half belongs to the command people already run and the online half
 is a separate command, not a flag on the first.
 
-**modelith does not implement network transport.** It shells out to `git` and
-`gh`, which already handle authentication, private hosts, proxies, SSH agents,
-and 2FA. The binary keeps no HTTP client, no TLS configuration, and no
-credential handling. This is the choice `cmd/go` made for VCS fetches.
+**modelith does not implement network transport.** It shells out to `gh` for
+GitHub and `az` for Azure DevOps, which already handle authentication, private
+hosts, proxies, SSH agents, and 2FA. The binary keeps no HTTP client, no TLS
+configuration, and no credential handling. This is the choice `cmd/go` made
+for VCS fetches.
 
 ## Why
 
@@ -81,3 +82,10 @@ credential handling. This is the choice `cmd/go` made for VCS fetches.
 - The offline packages import `net/url` and `net/netip` today, via the JSON
   Schema library's format validation. Both are parsers that perform no I/O, so
   they are permitted by name.
+
+## Amendments
+
+- **2026-07-30:** Extended to support Azure DevOps via the `az` CLI. The same
+  argv-only, no-shell, no-credential principles apply. The ADO resource ID
+  `499b84ac-1321-427f-aa17-267ca6975798` is hardcoded because `az rest` cannot
+  derive the AAD audience from `dev.azure.com` alone.

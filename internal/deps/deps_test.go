@@ -123,6 +123,7 @@ func TestParseSource(t *testing.T) {
 			name: "a browser blob URL",
 			raw:  blobURL,
 			want: Source{
+				Host:   HostGitHub,
 				Origin: "https://github.com/acme/billing", Owner: "acme", Repo: "billing",
 				Ref: "main", Path: "docs/payments.modelith.yaml",
 			},
@@ -131,6 +132,7 @@ func TestParseSource(t *testing.T) {
 			name: "a query and anchor are not part of the address",
 			raw:  blobURL + "?plain=1#L12",
 			want: Source{
+				Host:   HostGitHub,
 				Origin: "https://github.com/acme/billing", Owner: "acme", Repo: "billing",
 				Ref: "main", Path: "docs/payments.modelith.yaml",
 			},
@@ -140,6 +142,7 @@ func TestParseSource(t *testing.T) {
 			raw:  blobURL,
 			ref:  "v2.1.0",
 			want: Source{
+				Host:   HostGitHub,
 				Origin: "https://github.com/acme/billing", Owner: "acme", Repo: "billing",
 				Ref: "v2.1.0", Path: "docs/payments.modelith.yaml",
 			},
@@ -151,6 +154,7 @@ func TestParseSource(t *testing.T) {
 			raw:  "https://github.com/acme/billing/blob/release/v2/docs/payments.modelith.yaml",
 			ref:  "release/v2",
 			want: Source{
+				Host:   HostGitHub,
 				Origin: "https://github.com/acme/billing", Owner: "acme", Repo: "billing",
 				Ref: "release/v2", Path: "docs/payments.modelith.yaml",
 			},
@@ -161,6 +165,7 @@ func TestParseSource(t *testing.T) {
 			name: "the host is matched without regard to case or a www prefix",
 			raw:  "https://WWW.GitHub.com/acme/billing/blob/main/docs/payments.modelith.yaml",
 			want: Source{
+				Host:   HostGitHub,
 				Origin: "https://github.com/acme/billing", Owner: "acme", Repo: "billing",
 				Ref: "main", Path: "docs/payments.modelith.yaml",
 			},
@@ -485,7 +490,7 @@ func TestImport_RefusesToOverwriteWhatItDidNotWrite(t *testing.T) {
 func TestSplitHint(t *testing.T) {
 	t.Parallel()
 
-	src := Source{Ref: "main", Path: "docs/payments.modelith.yaml"}
+	src := Source{Host: HostGitHub, Ref: "main", Path: "docs/payments.modelith.yaml"}
 	cases := []struct {
 		name string
 		src  Source
@@ -498,7 +503,7 @@ func TestSplitHint(t *testing.T) {
 		{"a forbidden repository", src, fmt.Errorf("gh: HTTP 403: Forbidden"), false},
 		{"an unreachable network", src, fmt.Errorf("dial tcp: lookup api.github.com: no such host"), false},
 		{"a single-segment path has nothing to lose to the ref",
-			Source{Ref: "main", Path: "payments.modelith.yaml"}, fmt.Errorf("gh: HTTP 404: Not Found"), false},
+			Source{Host: HostGitHub, Ref: "main", Path: "payments.modelith.yaml"}, fmt.Errorf("gh: HTTP 404: Not Found"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -632,6 +637,7 @@ func TestParseSource_ADO(t *testing.T) {
 			name: "a browser ADO blob URL with GB branch",
 			raw:  adoBlobURL,
 			want: Source{
+				Host:    HostADO,
 				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				Owner:   "myorg",
 				Project: "myproject",
@@ -646,12 +652,28 @@ func TestParseSource_ADO(t *testing.T) {
 			raw:  adoBlobURL,
 			ref:  "release/v2",
 			want: Source{
+				Host:    HostADO,
 				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				Owner:   "myorg",
 				Project: "myproject",
 				Repo:    "myrepo",
 				Ref:     "release/v2",
-				RefType: "branch",
+				RefType: "",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
+			name: "an explicit ref resets RefType so the API auto-detects",
+			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain",
+			ref:  "v1.0.0",
+			want: Source{
+				Host:    HostADO,
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "v1.0.0",
+				RefType: "",
 				Path:    "docs/payments.modelith.yaml",
 			},
 		},
@@ -659,6 +681,7 @@ func TestParseSource_ADO(t *testing.T) {
 			name: "GT tag prefix",
 			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GTv1.0.0",
 			want: Source{
+				Host:    HostADO,
 				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				Owner:   "myorg",
 				Project: "myproject",
@@ -672,6 +695,7 @@ func TestParseSource_ADO(t *testing.T) {
 			name: "GC commit prefix",
 			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GC" + adoCommit,
 			want: Source{
+				Host:    HostADO,
 				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				Owner:   "myorg",
 				Project: "myproject",
@@ -685,6 +709,7 @@ func TestParseSource_ADO(t *testing.T) {
 			name: "an anchor is stripped",
 			raw:  adoBlobURL + "&_a=contents",
 			want: Source{
+				Host:    HostADO,
 				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				Owner:   "myorg",
 				Project: "myproject",
@@ -708,6 +733,25 @@ func TestParseSource_ADO(t *testing.T) {
 			name:    "a traversal segment is rejected",
 			raw:     "https://dev.azure.com/myorg/../_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain",
 			wantErr: `has a ".." path segment`,
+		},
+		{
+			name:    "no version parameter and no --ref",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml",
+			wantErr: "has no version parameter",
+		},
+		{
+			name: "a bare version with no prefix uses the auto-detect path",
+			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=main",
+			want: Source{
+				Host:    HostADO,
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "main",
+				RefType: "",
+				Path:    "docs/payments.modelith.yaml",
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -866,6 +910,39 @@ func TestImport_ADO_CommitUsesVersionTypeCommit(t *testing.T) {
 	}
 }
 
+// TestImport_ADO_OverrideRefOmitsVersionType pins that when --ref overrides
+// the URL's ref, the API call omits versionType so ADO auto-detects.
+func TestImport_ADO_OverrideRefOmitsVersionType(t *testing.T) {
+	t.Parallel()
+
+	r := adoRunner(adoContent, adoCommit)
+	// URL has GBmain (branch), but --ref overrides to a tag-like value.
+	url := adoBlobURL
+	_, err := Import(context.Background(), Options{
+		URL: url,
+		Dir: t.TempDir(),
+		Ref: "v1.0.0",
+		Now: time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range r.calls {
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "versionType") {
+					t.Errorf("--ref override should omit versionType, got %q", uri)
+				}
+				if !strings.Contains(uri, "version=v1.0.0") {
+					t.Errorf("--ref override should use the override value in version=, got %q", uri)
+				}
+			}
+		}
+	}
+}
+
 func TestImport_ADO_RejectsAlreadyVendored(t *testing.T) {
 	t.Parallel()
 
@@ -916,10 +993,32 @@ func TestImport_ADO_Rejections(t *testing.T) {
 	}
 }
 
+// TestImport_ADO_RejectsEmptyRef pins that an ADO URL without a version
+// parameter and no --ref is rejected with a clear message, rather than
+// silently stamping a header with an empty ref.
+func TestImport_ADO_RejectsEmptyRef(t *testing.T) {
+	t.Parallel()
+
+	url := "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml"
+	_, err := Import(context.Background(), Options{
+		URL: url,
+		Dir: t.TempDir(),
+		Now: time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run: adoRunner(adoContent, adoCommit),
+	})
+	if err == nil {
+		t.Fatal("want an error for a URL with no version parameter, got nil")
+	}
+	if !strings.Contains(err.Error(), "has no version parameter") {
+		t.Errorf("want 'has no version parameter' in error, got: %v", err)
+	}
+}
+
 func TestSplitHint_ADO(t *testing.T) {
 	t.Parallel()
 
 	src := Source{
+		Host:    HostADO,
 		Project: "myproject",
 		Ref:     "main",
 		Path:    "docs/payments.modelith.yaml",
