@@ -1,0 +1,584 @@
+# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
+kind: DomainModel
+version: v1
+title: Modelith
+description: >-
+  The tooling that authors, validates, and renders domain models. This model
+  describes modelith's own domain — the concepts a contributor or agent needs
+  to navigate the codebase — so it covers both the format (what goes into a
+  `Model`) and the engine (what processes one).
+
+glossary:
+  Author: >-
+    A human or agent who creates and edits a `Model` by conversation. Not
+    modeled as an entity.
+  Contributor: >-
+    A human or agent working on modelith itself. Not modeled as an entity.
+
+enums:
+  HostKind:
+    description: The remote platform an `Import`'s `Source` points to.
+    values:
+      - name: GitHub
+        definition: A github.com repository; transport delegates to `gh api`.
+      - name: ADO
+        definition: An Azure DevOps (dev.azure.com) repository; transport delegates to `az rest`.
+
+  FindingSeverity:
+    description: The classification of a `LintFinding`.
+    values:
+      - name: error
+        definition: Must fix; the model is structurally or semantically invalid.
+      - name: warning
+        definition: Likely a bug — e.g. a dangling reference or ambiguous name.
+      - name: gap
+        definition: Advisory completeness gap — e.g. an entity with no invariants.
+
+  LintLayer:
+    description: The three ordered stages of a lint run.
+    values:
+      - name: structural
+        definition: JSON Schema conformance; errors here block later stages.
+      - name: semantic
+        definition: Relationship targets exist, invariant ids resolve, backtick terms are defined.
+      - name: completeness
+        definition: Every entity has invariants; every entity is touched by a scenario.
+
+  RendererBackend:
+    description: Which output format the `Renderer` targets.
+    values:
+      - name: markdown
+        definition: A `Document` file (`*.modelith.md`) with an embedded Mermaid `erDiagram`.
+      - name: mermaid
+        definition: A standalone `erDiagram` block, used when the diagram is needed on its own.
+
+entities:
+  Model:
+    definition: >-
+      A `*.modelith.yaml` file — the canonical, plain-language source of truth
+      for a domain. It declares `Entity`s, `Enum`s, `Scenario`s, and
+      `GlossaryTerm`s, plus model-level `Invariant`s. A `Model` may `Import`
+      other `Model`s to share vocabulary.
+    relationships:
+      - entity: Entity
+        cardinality: 1:n
+        ownership: owned
+      - entity: Enum
+        cardinality: 1:n
+        ownership: owned
+      - entity: Scenario
+        cardinality: 1:n
+        ownership: owned
+      - entity: GlossaryTerm
+        cardinality: 1:n
+        ownership: owned
+      - entity: Import
+        cardinality: 1:n
+        ownership: referenced
+    attributes:
+      - name: kind
+        type: string
+        description: Always `DomainModel`; the file-type discriminator.
+      - name: version
+        type: string
+        description: The `Schema` version this model conforms to (e.g. `v1`).
+      - name: title
+        type: string
+        description: Human-facing name of the model.
+      - name: entityCount
+        type: integer
+        derived: true
+        derivation: The number of `Entity`s declared in this `Model`.
+    actions:
+      - name: lint
+        actor: Author
+        preserves: [model-has-version, linter-three-layers]
+        description: Run the `Linter` against this `Model` and surface every `LintFinding`.
+      - name: render
+        actor: Author
+        preserves: [renderer-output-matches-model, lint-before-render]
+        description: Produce a `Document` from this `Model` via the `Renderer`.
+      - name: import
+        actor: Author
+        preserves: [import-pinned-to-ref, import-has-provenance]
+        description: Fetch and vendor a remote `Model` from a `Source`.
+    invariants:
+      - id: model-has-version
+        statement: Every `Model` declares a `version` matching a known `Schema` version.
+      - id: model-has-at-least-one-entity
+        statement: A `Model` has at least one `Entity` — an empty model describes nothing.
+
+  Entity:
+    definition: >-
+      A named concept within a `Model`. It carries a prose `definition`, typed
+      `Attribute`s, `Relationship`s to other `Entity`s, `Action`s that may be
+      performed on it, and `Invariant`s that must always hold.
+    relationships:
+      - entity: Attribute
+        cardinality: 1:n
+        ownership: owned
+      - entity: Relationship
+        cardinality: 1:n
+        ownership: owned
+      - entity: Action
+        cardinality: 1:n
+        ownership: owned
+      - entity: Invariant
+        cardinality: 1:n
+        ownership: owned
+        note: Entity-scoped invariants; cross-entity rules live on the `Model`.
+    attributes:
+      - name: name
+        type: string
+        description: Canonical PascalCase identifier (e.g. `ParkingSpot`, not `parking_spot`).
+
+  Attribute:
+    definition: >-
+      A typed property of an `Entity`. Its type is a primitive (`string`,
+      `integer`, `boolean`, `timestamp`), a defined `Enum`, or a cross-model
+      reference (`scope.Name`). An `Attribute` may be `derived` — computed from
+      other state rather than stored.
+    relationships:
+      - entity: Enum
+        cardinality: n:1
+        ownership: referenced
+        note: Set when the attribute's type is a defined `Enum`.
+    attributes:
+      - name: name
+        type: string
+        description: The property name in the owning `Entity`.
+      - name: type
+        type: string
+        description: >-
+          A primitive (`string`, `integer`, `boolean`, `timestamp`), a defined
+          `Enum` name, or a cross-model reference (`payments.PaymentMethod`).
+      - name: derived
+        type: boolean
+        description: True when the value is computed from other state rather than stored.
+      - name: derivation
+        type: string
+        description: Prose explanation of how the value is computed; required when `derived` is true.
+
+  Relationship:
+    definition: >-
+      A directed connection between two `Entity`s, declared from the parent.
+      It carries a `cardinality` (`1:1`, `1:n`, `n:1`, `n:n`), an optional
+      `ownership` (`owned` or `referenced`), an optional short `role` label,
+      and an optional `note` for detail.
+    relationships:
+      - entity: Entity
+        cardinality: n:1
+        ownership: referenced
+        role: target
+        note: The `Entity` this relationship points to.
+    attributes:
+      - name: cardinality
+        type: string
+        description: Exactly one of `1:1`, `1:n`, `n:1`, or `n:n`.
+      - name: ownership
+        type: string
+        description: >-
+          `owned` when the target `Entity` is part of this one and cannot exist
+          independently; `referenced` when the target is independent.
+      - name: role
+        type: string
+        description: A short label drawn on the diagram line, e.g. `Owner`.
+      - name: note
+        type: string
+        description: Prose detail that doesn't fit in a short `role` label.
+
+  Invariant:
+    definition: >-
+      A rule that must always hold, identified by a unique `id` and a prose
+      `statement`. Scoped to an `Entity` (entity-level) or to the `Model`
+      (model-level, for cross-entity rules). Referenced by `Scenario` steps
+      and `Action` `preserves` lists.
+    relationships:
+      - entity: Entity
+        cardinality: n:1
+        ownership: referenced
+        note: Set when entity-scoped; absent for model-level invariants.
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+        note: Set when model-scoped; absent for entity-level invariants.
+    attributes:
+      - name: id
+        type: string
+        description: >-
+          Unique lowercase-kebab-case identifier across the entire model
+          (e.g. `at-least-one-owner`).
+      - name: statement
+        type: string
+        description: The rule stated in prose, with entities backticked.
+
+  Action:
+    definition: >-
+      An operation that may be performed on an `Entity`. Declares the `actor`
+      (a `GlossaryTerm` role or another `Entity`), which `Invariant`s it
+      `preserves`, and a prose `description`.
+    relationships:
+      - entity: GlossaryTerm
+        cardinality: n:1
+        ownership: referenced
+        note: The actor role, when the actor is a glossary term rather than an entity.
+    attributes:
+      - name: name
+        type: string
+        description: The operation name (e.g. `archive`, `enter-with-keycard`).
+      - name: actor
+        type: string
+        description: The `GlossaryTerm` role or `Entity` that performs this action.
+      - name: preserves
+        type: string
+        description: List of `Invariant` ids this action must not violate.
+      - name: description
+        type: string
+        description: Prose explanation of what the action does.
+
+  Enum:
+    definition: >-
+      A value type defined at the `Model` level. Each `Enum` has a
+      `description` and a list of named `values`, each with a `name` and
+      `definition`. Referenced by `Attribute` `type`.
+    relationships:
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+    attributes:
+      - name: name
+        type: string
+        description: The PascalCase name used as an `Attribute` `type` (e.g. `ProjectStatus`).
+      - name: description
+        type: string
+        description: What the enum represents and where it applies.
+
+  Scenario:
+    definition: >-
+      A short narrative that stress-tests the `Model` by walking through a
+      sequence of `steps` with named `actors`. Each `Scenario` declares which
+      `Invariant`s it touches, so the linter can flag gaps.
+    relationships:
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+    attributes:
+      - name: name
+        type: string
+        description: Short human-facing title (e.g. "Monthly parker uses a reserved spot").
+      - name: actors
+        type: string
+        description: The `Entity`s and `GlossaryTerm`s that participate in this scenario.
+      - name: invariants_touched
+        type: string
+        description: The `Invariant` ids this scenario exercises.
+
+  GlossaryTerm:
+    definition: >-
+      A non-entity vocabulary term — a role, an actor, or a domain noun —
+      defined at the `Model` level with a prose `definition`. Referenced by
+      `Action` `actor` and `Scenario` `actors`.
+    relationships:
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+    attributes:
+      - name: name
+        type: string
+        description: The term being defined (e.g. `Owner`, `Member`).
+      - name: definition
+        type: string
+        description: Prose definition of what the term means in this domain.
+
+  Schema:
+    definition: >-
+      A versioned JSON Schema that defines the valid structure of a `Model`.
+      The schema is the source of truth for the format; Go structs in
+      `internal/model` are kept property-for-property in sync with it by
+      TestSchemaStructSync. Each `Schema` version is a directory under
+      `internal/schema/`.
+    relationships:
+      - entity: Model
+        cardinality: 1:n
+        ownership: referenced
+        note: A `Schema` validates every `Model` that declares its version.
+    attributes:
+      - name: version
+        type: string
+        description: The version label (e.g. `v1`) — matches the directory name under `internal/schema/`.
+      - name: path
+        type: string
+        description: The directory holding the schema, e.g. `internal/schema/v1/`.
+    invariants:
+      - id: schema-struct-sync
+        statement: >-
+          Every property in the `Schema` has a matching Go struct field and vice
+          versa, enforced by TestSchemaStructSync.
+      - id: schema-version-immutable
+        statement: >-
+          A shipped `Schema` version is never mutated; format evolution adds a
+          new version directory.
+
+  Linter:
+    definition: >-
+      The validation engine that checks a `Model`. Operates in three layers:
+      structural (JSON Schema conformance), semantic (relationship targets
+      exist, invariant ids resolve), and completeness (every `Entity` has
+      `Invariant`s, every `Entity` is touched by a `Scenario`).
+    relationships:
+      - entity: Schema
+        cardinality: n:1
+        ownership: referenced
+        note: The `Schema` the `Linter` validates against.
+      - entity: Model
+        cardinality: 1:n
+        ownership: referenced
+        note: The `Model`s the `Linter` checks.
+      - entity: LintFinding
+        cardinality: 1:n
+        ownership: owned
+    attributes:
+      - name: strictMode
+        type: boolean
+        description: >-
+          When set (`--completeness error`), completeness gaps are promoted to
+          blocking errors.
+      - name: errorCount
+        type: integer
+        derived: true
+        derivation: The number of `LintFinding`s with `severity` = `error` from the most recent run.
+    actions:
+      - name: run
+        actor: Author
+        preserves: [linter-three-layers, linter-exit-code]
+        description: >-
+          Execute all three layers against a `Model` and produce `LintFinding`s.
+    invariants:
+      - id: linter-three-layers
+        statement: >-
+          Every lint run applies all three layers — structural, semantic, and
+          completeness — in that order. Structural errors block semantic checks.
+      - id: linter-exit-code
+        statement: >-
+          The `Linter` exits non-zero when there are errors; warnings and gaps
+          do not affect the exit code unless `--completeness error` is set.
+
+  LintFinding:
+    definition: >-
+      One issue discovered during a lint run. A finding is an error (must fix),
+      a warning (likely a bug), or a completeness gap (advisory). Each finding
+      points to the specific part of the `Model` it concerns.
+    relationships:
+      - entity: Linter
+        cardinality: n:1
+        ownership: referenced
+    attributes:
+      - name: severity
+        type: FindingSeverity
+        description: Whether this finding blocks (error), warns, or advises (gap).
+      - name: layer
+        type: LintLayer
+        description: Which lint stage produced this finding.
+      - name: path
+        type: string
+        description: JSON Pointer to the part of the `Model` this finding concerns.
+    invariants:
+      - id: finding-has-severity
+        statement: Every `LintFinding` has exactly one `severity`.
+
+  Renderer:
+    definition: >-
+      Produces a rendered `Document` from a `Model`. The renderer has two
+      backends: Markdown (embeds Mermaid diagrams) and Mermaid (standalone
+      `erDiagram`). CI uses `render --check` to fail on drift.
+    relationships:
+      - entity: Model
+        cardinality: 1:n
+        ownership: referenced
+        note: The `Model`s the `Renderer` produces output for.
+      - entity: Document
+        cardinality: 1:n
+        ownership: owned
+    attributes:
+      - name: backend
+        type: RendererBackend
+        description: The output format — Markdown or standalone Mermaid.
+    actions:
+      - name: render
+        actor: Author
+        preserves: [renderer-output-matches-model]
+        description: Generate a `Document` from a `Model` and write it to disk.
+      - name: check
+        actor: Contributor
+        preserves: [document-never-hand-edited]
+        description: >-
+          Regenerate the `Document` and compare it to the committed copy;
+          fail if they differ.
+    invariants:
+      - id: renderer-output-matches-model
+        statement: >-
+          A `Document` produced by the `Renderer` reflects the current state of
+          the `Model` — every `Entity`, `Invariant`, and `Scenario` is present.
+
+  Document:
+    definition: >-
+      The rendered Markdown file (`*.modelith.md`) committed alongside the
+      `Model`. Generated by the `Renderer`; never edited by hand. Contains
+      the model's definitions, invariants, scenarios, and an embedded Mermaid
+      `erDiagram`.
+    relationships:
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+        note: The `Model` this `Document` was generated from.
+    attributes:
+      - name: path
+        type: string
+        description: >-
+          The file path, derived from the `Model`'s path by replacing
+          `.modelith.yaml` with `.modelith.md`.
+    invariants:
+      - id: document-never-hand-edited
+        statement: >-
+          A `Document` is generated exclusively by the `Renderer`; hand edits
+          are detected by `render --check` and rejected in CI.
+      - id: document-committed-with-model
+        statement: >-
+          A `Document` is committed to the same repository as its `Model`, so
+          readers see the rendered form without running any tool.
+
+  Import:
+    definition: >-
+      A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or
+      Azure DevOps URL pinned to a ref). Stored under `.modelith/deps/` with
+      provenance headers recording origin, ref, and digest.
+    relationships:
+      - entity: Source
+        cardinality: n:1
+        ownership: referenced
+        note: The remote origin this `Import` was fetched from.
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+        note: The local `Model` that declares this import.
+    attributes:
+      - name: vendoredPath
+        type: string
+        description: >-
+          Where the vendored file lives, e.g. `.modelith/deps/payments.modelith.yaml`.
+      - name: digest
+        type: string
+        description: Content hash recorded at fetch time for integrity verification.
+      - name: stale
+        type: boolean
+        derived: true
+        derivation: >-
+          True when the remote `Source` has moved past the pinned ref —
+          the vendored copy may be out of date.
+    actions:
+      - name: fetch
+        actor: Author
+        preserves: [import-pinned-to-ref, import-has-provenance, source-host-unambiguous]
+        description: >-
+          Fetch the remote `Model` from the `Source`, write it to
+          `.modelith/deps/`, and stamp provenance headers.
+    invariants:
+      - id: import-pinned-to-ref
+        statement: >-
+          An `Import` is always pinned to a specific ref (branch, tag, or
+          commit) — it never tracks a moving target like `main`.
+      - id: import-has-provenance
+        statement: >-
+          Every vendored `Import` carries provenance headers recording the
+          `Source` URL, the pinned ref, and a content digest for integrity
+          verification.
+
+  Source:
+    definition: >-
+      A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to
+      a ref (branch, tag, or commit). The `Source` carries a host discriminator
+      (HostGitHub or HostADO) so the transport layer can delegate to the
+      right CLI (`gh api` or `az rest`).
+    relationships:
+      - entity: Import
+        cardinality: 1:n
+        ownership: referenced
+    attributes:
+      - name: host
+        type: HostKind
+        description: Which remote platform this source points to.
+      - name: url
+        type: string
+        description: The full repository URL, including path and version query.
+      - name: ref
+        type: string
+        description: The pinned ref (branch, tag, or commit) the source is locked to.
+    invariants:
+      - id: source-host-unambiguous
+        statement: >-
+          Every `Source` has exactly one `host` — GitHub or ADO, never both and
+          never neither. The host determines which CLI the transport layer uses.
+
+scenarios:
+  - name: Author creates a model and lints it
+    actors: [Author, Model, Linter, Schema, LintFinding]
+    steps:
+      - An `Author` writes a `Model` declaring a `version` matching a known `Schema`.
+      - The `Author` runs `Model.lint`; the `Linter` executes `run` against the `Model`.
+      - The `Linter` applies structural checks first, then semantic, then completeness.
+      - Each issue is recorded as a `LintFinding` with a `severity` and `layer`.
+    invariants_touched:
+      - model-has-version
+      - linter-three-layers
+      - schema-struct-sync
+
+  - name: Model imports a dependency
+    actors: [Author, Model, Import, Source]
+    steps:
+      - An `Author` adds an `Import` declaration to a `Model`, pointing at a
+        `Source` with a GitHub URL pinned to a tag.
+      - The `Author` runs `Import.fetch`; the tool fetches the remote `Model`
+        and vendors it under `.modelith/deps/`.
+      - "Provenance headers are stamped into the vendored copy: the `Source` URL,
+        the pinned ref, and a content digest."
+      - A subsequent `Model.lint` resolves cross-model references (`scope.Name`)
+        against the vendored `Import`.
+    invariants_touched:
+      - import-pinned-to-ref
+      - import-has-provenance
+      - source-host-unambiguous
+
+  - name: Renderer produces a document
+    actors: [Author, Model, Renderer, Document]
+    steps:
+      - An `Author` has a `Model` that passes `Model.lint` with no errors.
+      - The `Author` runs `Model.render`; the `Renderer` generates a `Document`
+        — a Markdown file with an embedded Mermaid `erDiagram`.
+      - The `Document` contains every `Entity`, `Invariant`, and `Scenario`
+        from the `Model`.
+      - The `Author` commits the `Document` alongside the `Model`.
+    invariants_touched:
+      - renderer-output-matches-model
+      - document-committed-with-model
+      - lint-before-render
+
+  - name: CI detects document drift
+    actors: [Contributor, Document, Renderer, Model]
+    steps:
+      - A `Contributor` edits only the `Model` and forgets to regenerate the
+        `Document`.
+      - CI runs `Renderer.check`, which regenerates the `Document` from the
+        `Model` and compares it to the committed copy.
+      - The check fails because the committed `Document` is stale.
+      - The `Contributor` runs `Model.render` to regenerate the `Document`
+        and commits it; the check passes.
+    invariants_touched:
+      - document-never-hand-edited
+      - renderer-output-matches-model
+
+invariants:
+  - id: lint-before-render
+    statement: >-
+      A `Model` that fails `Linter` structural checks cannot be rendered — the
+      `Renderer` requires a structurally valid `Model`.
+
