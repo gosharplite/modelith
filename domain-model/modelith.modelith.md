@@ -68,6 +68,10 @@ An operation that may be performed on an `Entity`. Declares the `actor` (a `Glos
 | `preserves` | string | List of `Invariant` ids this action must not violate. |
 | `description` | string | Prose explanation of what the action does. |
 
+**Invariants**
+
+- **action-actor-defined** — An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
+
 ### `Attribute`
 
 A typed property of an `Entity`. Its type is a primitive (`string`, `integer`, `boolean`, `timestamp`), a defined `Enum`, or a cross-model reference (`scope.Name`). An `Attribute` may be `derived` — computed from other state rather than stored.
@@ -84,6 +88,10 @@ A typed property of an `Entity`. Its type is a primitive (`string`, `integer`, `
 | `type` | string | A primitive (`string`, `integer`, `boolean`, `timestamp`), a defined `Enum` name, or a cross-model reference (`payments.PaymentMethod`). |
 | `derived` | boolean | True when the value is computed from other state rather than stored. |
 | `derivation` | string | Prose explanation of how the value is computed; required when `derived` is true. |
+
+**Invariants**
+
+- **derived-attribute-has-derivation** — An `Attribute` with `derived` set to true must provide a `derivation` string.
 
 ### `Document`
 
@@ -121,6 +129,10 @@ A named concept within a `Model`. It carries a prose `definition`, typed `Attrib
 | --- | --- | --- |
 | `name` | string | Canonical PascalCase identifier (e.g. `ParkingSpot`, not `parking_spot`). |
 
+**Invariants**
+
+- **entity-name-is-pascalcase** — An `Entity` must have a PascalCase `name`.
+
 ### `Enum`
 
 A value type defined at the `Model` level. Each `Enum` has a `description` and a list of named `values`, each with a `name` and `definition`. Referenced by `Attribute` `type`.
@@ -136,6 +148,10 @@ A value type defined at the `Model` level. Each `Enum` has a `description` and a
 | `name` | string | The PascalCase name used as an `Attribute` `type` (e.g. `ProjectStatus`). |
 | `description` | string | What the enum represents and where it applies. |
 
+**Invariants**
+
+- **enum-has-values** — An `Enum` must declare at least one value.
+
 ### `GlossaryTerm`
 
 A non-entity vocabulary term — a role, an actor, or a domain noun — defined at the `Model` level with a prose `definition`. Referenced by `Action` `actor` and `Scenario` `actors`.
@@ -150,6 +166,10 @@ A non-entity vocabulary term — a role, an actor, or a domain noun — defined 
 | --- | --- | --- |
 | `name` | string | The term being defined (e.g. `Owner`, `Member`). |
 | `definition` | string | Prose definition of what the term means in this domain. |
+
+**Invariants**
+
+- **glossary-term-has-definition** — A `GlossaryTerm` must have a non-empty `definition`.
 
 ### `Import`
 
@@ -192,6 +212,10 @@ A rule that must always hold, identified by a unique `id` and a prose `statement
 | --- | --- | --- |
 | `id` | string | Unique lowercase-kebab-case identifier across the entire model (e.g. `at-least-one-owner`). |
 | `statement` | string | The rule stated in prose, with entities backticked. |
+
+**Invariants**
+
+- **invariant-id-unique** — An `Invariant` must have a unique `id` across the entire `Model`.
 
 ### `LintFinding`
 
@@ -288,6 +312,10 @@ A directed connection between two `Entity`s, declared from the parent. It carrie
 | `role` | string | A short label drawn on the diagram line, e.g. `Owner`. |
 | `note` | string | Prose detail that doesn't fit in a short `role` label. |
 
+**Invariants**
+
+- **relationship-valid-cardinality** — A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
+
 ### `Renderer`
 
 Produces a rendered `Document` from a `Model`. The renderer has two backends: Markdown (embeds Mermaid diagrams) and Mermaid (standalone `erDiagram`). CI uses `render --check` to fail on drift.
@@ -327,6 +355,10 @@ A short narrative that stress-tests the `Model` by walking through a sequence of
 | `name` | string | Short human-facing title (e.g. "Monthly parker uses a reserved spot"). |
 | `actors` | string | The `Entity`s and `GlossaryTerm`s that participate in this scenario. |
 | `invariants_touched` | string | The `Invariant` ids this scenario exercises. |
+
+**Invariants**
+
+- **scenario-touches-invariants** — A `Scenario` must list at least one valid invariant id in `invariants_touched`.
 
 ### `Schema`
 
@@ -415,6 +447,30 @@ erDiagram
 - **lint-before-render** — A `Model` that fails `Linter` structural checks cannot be rendered — the `Renderer` requires a structurally valid `Model`.
 
 ## Scenarios
+
+### Author defines the core structure of a model
+
+**Actors:** Author, Model, GlossaryTerm, Enum, Entity, Attribute, Relationship, Action, Invariant, Scenario
+
+**Steps**
+
+1. An `Author` defines a `GlossaryTerm` and an `Enum` for shared vocabulary.
+2. The `Author` creates an `Entity` with a derived `Attribute`.
+3. The `Author` creates a second `Entity` and links them with a `Relationship`.
+4. The `Author` adds an `Action` to the entity performed by the `GlossaryTerm` actor.
+5. The `Author` adds an `Invariant` and a `Scenario` touching that invariant.
+6. The linter validates these structural elements.
+
+**Invariants touched**
+
+- **derived-attribute-has-derivation** — An `Attribute` with `derived` set to true must provide a `derivation` string.
+- **action-actor-defined** — An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
+- **relationship-valid-cardinality** — A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
+- **glossary-term-has-definition** — A `GlossaryTerm` must have a non-empty `definition`.
+- **entity-name-is-pascalcase** — An `Entity` must have a PascalCase `name`.
+- **enum-has-values** — An `Enum` must declare at least one value.
+- **invariant-id-unique** — An `Invariant` must have a unique `id` across the entire `Model`.
+- **scenario-touches-invariants** — A `Scenario` must list at least one valid invariant id in `invariants_touched`.
 
 ### Author creates a model and lints it
 

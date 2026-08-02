@@ -131,6 +131,9 @@ entities:
       - name: name
         type: string
         description: Canonical PascalCase identifier (e.g. `ParkingSpot`, not `parking_spot`).
+    invariants:
+      - id: entity-name-is-pascalcase
+        statement: An `Entity` must have a PascalCase `name`.
 
   Attribute:
     definition: >-
@@ -158,6 +161,9 @@ entities:
       - name: derivation
         type: string
         description: Prose explanation of how the value is computed; required when `derived` is true.
+    invariants:
+      - id: derived-attribute-has-derivation
+        statement: An `Attribute` with `derived` set to true must provide a `derivation` string.
 
   Relationship:
     definition: >-
@@ -186,6 +192,9 @@ entities:
       - name: note
         type: string
         description: Prose detail that doesn't fit in a short `role` label.
+    invariants:
+      - id: relationship-valid-cardinality
+        statement: A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
 
   Invariant:
     definition: >-
@@ -211,6 +220,9 @@ entities:
       - name: statement
         type: string
         description: The rule stated in prose, with entities backticked.
+    invariants:
+      - id: invariant-id-unique
+        statement: An `Invariant` must have a unique `id` across the entire `Model`.
 
   Action:
     definition: >-
@@ -235,6 +247,9 @@ entities:
       - name: description
         type: string
         description: Prose explanation of what the action does.
+    invariants:
+      - id: action-actor-defined
+        statement: An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
 
   Enum:
     definition: >-
@@ -252,6 +267,9 @@ entities:
       - name: description
         type: string
         description: What the enum represents and where it applies.
+    invariants:
+      - id: enum-has-values
+        statement: An `Enum` must declare at least one value.
 
   Scenario:
     definition: >-
@@ -272,6 +290,9 @@ entities:
       - name: invariants_touched
         type: string
         description: The `Invariant` ids this scenario exercises.
+    invariants:
+      - id: scenario-touches-invariants
+        statement: A `Scenario` must list at least one valid invariant id in `invariants_touched`.
 
   GlossaryTerm:
     definition: >-
@@ -289,6 +310,9 @@ entities:
       - name: definition
         type: string
         description: Prose definition of what the term means in this domain.
+    invariants:
+      - id: glossary-term-has-definition
+        statement: A `GlossaryTerm` must have a non-empty `definition`.
 
   Schema:
     definition: >-
@@ -520,6 +544,25 @@ entities:
           never neither. The host determines which CLI the transport layer uses.
 
 scenarios:
+  - name: Author defines the core structure of a model
+    actors: [Author, Model, GlossaryTerm, Enum, Entity, Attribute, Relationship, Action, Invariant, Scenario]
+    steps:
+      - An `Author` defines a `GlossaryTerm` and an `Enum` for shared vocabulary.
+      - The `Author` creates an `Entity` with a derived `Attribute`.
+      - The `Author` creates a second `Entity` and links them with a `Relationship`.
+      - The `Author` adds an `Action` to the entity performed by the `GlossaryTerm` actor.
+      - The `Author` adds an `Invariant` and a `Scenario` touching that invariant.
+      - The linter validates these structural elements.
+    invariants_touched:
+      - derived-attribute-has-derivation
+      - action-actor-defined
+      - relationship-valid-cardinality
+      - glossary-term-has-definition
+      - entity-name-is-pascalcase
+      - enum-has-values
+      - invariant-id-unique
+      - scenario-touches-invariants
+
   - name: Author creates a model and lints it
     actors: [Author, Model, Linter, Schema, LintFinding]
     steps:
