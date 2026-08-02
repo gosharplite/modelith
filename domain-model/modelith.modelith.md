@@ -2,7 +2,7 @@
 
 # Modelith
 
-The tooling that authors, validates, and renders domain models. This model describes modelith's own domain — the concepts a contributor or agent needs to navigate the codebase — so it covers both the format (what goes into a `Model`) and the engine (what processes one).
+Tooling for authoring domain models by conversation. An `Author` describes concepts in plain language to a `Skill`, which drafts the `Model` YAML. The `Linter` validates it against a `Schema`; the `Renderer` produces a `Document` committed alongside it. A `GitHubAction` enforces both in CI. A `Model` can `Import` vocabulary from other repos, pinned to a ref with provenance. The `Example` golden fixture pins the renderer's output; `ADR`s record the decisions that shaped the tool.
 
 ## Glossary
 
@@ -49,7 +49,32 @@ Which output format the `Renderer` targets.
 | `markdown` | A `Document` file (`*.modelith.md`) with an embedded Mermaid `erDiagram`. |
 | `mermaid` | A standalone `erDiagram` block, used when the diagram is needed on its own. |
 
+### `SkillName`
+
+The three skills shipped in the Claude Code plugin.
+
+| Value | Definition |
+| --- | --- |
+| `author` | domain-model-author — drives the conversation that produces a `Model`. |
+| `lint` | domain-model-lint — runs the linter and interprets findings for the user. |
+| `context` | domain-model-context — loads a model as context before a coding task. |
+
 ## Entities
+
+### `ADR`
+
+A forward-looking architecture decision record in `project-docs/adr/`. Records a hard-to-reverse call with real trade-offs, so intentions stay current. Retrospective records go in `project-docs/audits/` instead.
+
+**Attributes**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `number` | integer | The sequential ADR number (e.g. 9 for ADR-0009). |
+| `title` | string | Short human-facing title of the decision. |
+
+**Invariants**
+
+- **adr-forward-looking** — An `ADR` records a decision made before or during implementation — it is forward-looking, not a retrospective audit.
 
 ### `Action`
 
@@ -70,7 +95,8 @@ An operation that may be performed on an `Entity`. Declares the `actor` (a `Glos
 
 **Invariants**
 
-- **action-actor-defined** — An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
+- **action-actor-resolves** — An `Action`'s actor is a declared `Entity` or `GlossaryTerm` — an undefined actor warns.
+- **action-preserves-resolves** — Every `Invariant` id in an `Action`'s preserves list resolves to a declared `Invariant` — a dangling id is an error.
 
 ### `Attribute`
 
@@ -91,7 +117,8 @@ A typed property of an `Entity`. Its type is a primitive (`string`, `integer`, `
 
 **Invariants**
 
-- **derived-attribute-has-derivation** — An `Attribute` with `derived` set to true must provide a `derivation` string.
+- **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
+- **attribute-derived-needs-derivation** — An `Attribute` marked `derived` must provide a `derivation` explaining how the value is computed.
 
 ### `Document`
 
@@ -131,7 +158,8 @@ A named concept within a `Model`. It carries a prose `definition`, typed `Attrib
 
 **Invariants**
 
-- **entity-name-is-pascalcase** — An `Entity` must have a PascalCase `name`.
+- **entity-name-pascal-case** — An `Entity` name is PascalCase, at least two characters, with no underscores or hyphens.
+- **entity-has-definition** — Every `Entity` has a non-empty `definition`.
 
 ### `Enum`
 
@@ -150,7 +178,41 @@ A value type defined at the `Model` level. Each `Enum` has a `description` and a
 
 **Invariants**
 
-- **enum-has-values** — An `Enum` must declare at least one value.
+- **enum-has-values** — An `Enum` declares at least one value.
+- **enum-value-has-name-and-definition** — Every value in an `Enum` has both a `name` and a `definition`.
+
+### `Example`
+
+The golden test fixture — `examples/example.modelith.yaml` and its committed `.md`. It must lint clean under strict mode and its `.md` must match the renderer's output exactly. Changes to the renderer or the example require regenerating the `.md`.
+
+**Relationships**
+
+- `Model` — n:1 — referenced — The `Example` is a `Model` with special constraints.
+- `Document` — 1:1 — owned — The committed `.md` is a golden fixture compared by TestGoldenExample.
+
+**Invariants**
+
+- **example-lints-clean** — The `Example` must lint clean under `task lint-models` — strict mode, where completeness gaps are errors.
+- **example-md-is-golden** — The `Example`'s `.md` is a golden fixture — it must match the `Renderer`'s output exactly, enforced by TestGoldenExample and `task render-check`.
+
+### `GitHubAction`
+
+The GitHub Action (`action.yml`) that runs `modelith lint` and `modelith render --check` in CI. It downloads a specific pinned release of the CLI rather than building from source.
+
+**Relationships**
+
+- `Linter` — n:1 — referenced — The `Linter` the `GitHubAction` invokes.
+- `Renderer` — n:1 — referenced — The `Renderer` the `GitHubAction` invokes with `--check`.
+
+**Attributes**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `version` | string | The pinned release tag the action downloads (e.g. `v0.1.0`). |
+
+**Invariants**
+
+- **action-version-pinned** — The `GitHubAction` downloads a specific pinned release — it does not build from source. After a release, `action.yml`'s default version must be bumped.
 
 ### `GlossaryTerm`
 
@@ -169,7 +231,7 @@ A non-entity vocabulary term — a role, an actor, or a domain noun — defined 
 
 **Invariants**
 
-- **glossary-term-has-definition** — A `GlossaryTerm` must have a non-empty `definition`.
+- **glossary-term-has-definition** — A `GlossaryTerm` has a non-empty `definition`.
 
 ### `Import`
 
@@ -215,7 +277,8 @@ A rule that must always hold, identified by a unique `id` and a prose `statement
 
 **Invariants**
 
-- **invariant-id-unique** — An `Invariant` must have a unique `id` across the entire `Model`.
+- **invariant-id-unique** — An `Invariant`'s id is unique across the entire `Model` — entity-level and model-level invariants share one namespace.
+- **invariant-id-kebab-case** — An `Invariant`'s id is lowercase kebab-case.
 
 ### `LintFinding`
 
@@ -265,7 +328,7 @@ The validation engine that checks a `Model`. Operates in three layers: structura
 
 ### `Model`
 
-A `*.modelith.yaml` file — the canonical, plain-language source of truth for a domain. It declares `Entity`s, `Enum`s, `Scenario`s, and `GlossaryTerm`s, plus model-level `Invariant`s. A `Model` may `Import` other `Model`s to share vocabulary.
+A `*.modelith.yaml` file — the canonical, plain-language source of truth for a domain. It declares `Entity`s, `Enum`s, `Scenario`s, and `GlossaryTerm`s, plus model-level `Invariant`s. A `Model` may `Import` other `Model`s to share vocabulary across repos.
 
 **Relationships**
 
@@ -314,7 +377,9 @@ A directed connection between two `Entity`s, declared from the parent. It carrie
 
 **Invariants**
 
-- **relationship-valid-cardinality** — A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
+- **relationship-cardinality-exact** — A `Relationship`'s cardinality is exactly one of `1:1`, `1:n`, `n:1`, or `n:n`.
+- **relationship-target-exists** — A `Relationship`'s target `Entity` must be declared in the same `Model`.
+- **relationship-not-both-owned** — A reciprocal `Relationship` pair cannot have both ends claiming `ownership: owned` — at most one end owns the relationship.
 
 ### `Renderer`
 
@@ -358,7 +423,8 @@ A short narrative that stress-tests the `Model` by walking through a sequence of
 
 **Invariants**
 
-- **scenario-touches-invariants** — A `Scenario` must list at least one valid invariant id in `invariants_touched`.
+- **scenario-has-steps** — A `Scenario` has at least one step.
+- **scenario-invariants-resolve** — Every `Invariant` id in a `Scenario`'s invariants_touched resolves to a declared `Invariant` — a dangling id is an error.
 
 ### `Schema`
 
@@ -379,6 +445,26 @@ A versioned JSON Schema that defines the valid structure of a `Model`. The schem
 
 - **schema-struct-sync** — Every property in the `Schema` has a matching Go struct field and vice versa, enforced by TestSchemaStructSync.
 - **schema-version-immutable** — A shipped `Schema` version is never mutated; format evolution adds a new version directory.
+
+### `Skill`
+
+A Claude Code plugin skill that drives the authoring workflow. The three skills — author, lint, context — are the primary interface to modelith; they shell out to the `modelith` binary, which must be installed separately.
+
+**Relationships**
+
+- `Model` — 1:n — referenced — The `Model`s the `Skill` authors, lints, or loads as context.
+- `Linter` — n:1 — referenced — The `Linter` the `Skill` shells out to.
+- `Renderer` — n:1 — referenced — The `Renderer` the `Skill` shells out to.
+
+**Attributes**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `name` | SkillName | Which of the three skills this is. |
+
+**Invariants**
+
+- **skill-shells-to-cli** — A `Skill` shells out to the `modelith` binary — it is not a library and does not embed the engine. The binary must be installed separately.
 
 ### `Source`
 
@@ -404,11 +490,14 @@ A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to a ref (b
 
 ```mermaid
 erDiagram
+    ADR {}
     Action {}
     Attribute {}
     Document {}
     Entity {}
     Enum {}
+    Example {}
+    GitHubAction {}
     GlossaryTerm {}
     Import {}
     Invariant {}
@@ -419,6 +508,7 @@ erDiagram
     Renderer {}
     Scenario {}
     Schema {}
+    Skill {}
     Source {}
     Action }o..|| GlossaryTerm : ""
     Attribute }o..|| Enum : ""
@@ -428,6 +518,10 @@ erDiagram
     Entity ||--o{ Action : ""
     Entity ||--o{ Invariant : ""
     Enum }o--|| Model : ""
+    Example }o..|| Model : ""
+    Example ||--|| Document : ""
+    GitHubAction }o..|| Linter : ""
+    GitHubAction }o..|| Renderer : ""
     GlossaryTerm }o--|| Model : ""
     Import }o..|| Source : ""
     Import }o..|| Model : ""
@@ -440,6 +534,9 @@ erDiagram
     Renderer ||..o{ Model : ""
     Renderer ||--o{ Document : ""
     Schema ||..o{ Model : ""
+    Skill ||..o{ Model : ""
+    Skill }o..|| Linter : ""
+    Skill }o..|| Renderer : ""
 ```
 
 ## Invariants
@@ -448,74 +545,53 @@ erDiagram
 
 ## Scenarios
 
-### Author defines the core structure of a model
+### Author creates a model by conversation
 
-**Actors:** Author, Model, GlossaryTerm, Enum, Entity, Attribute, Relationship, Action, Invariant, Scenario
-
-**Steps**
-
-1. An `Author` defines a `GlossaryTerm` and an `Enum` for shared vocabulary.
-2. The `Author` creates an `Entity` with a derived `Attribute`.
-3. The `Author` creates a second `Entity` and links them with a `Relationship`.
-4. The `Author` adds an `Action` to the entity performed by the `GlossaryTerm` actor.
-5. The `Author` adds an `Invariant` and a `Scenario` touching that invariant.
-6. The linter validates these structural elements.
-
-**Invariants touched**
-
-- **derived-attribute-has-derivation** — An `Attribute` with `derived` set to true must provide a `derivation` string.
-- **action-actor-defined** — An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
-- **relationship-valid-cardinality** — A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
-- **glossary-term-has-definition** — A `GlossaryTerm` must have a non-empty `definition`.
-- **entity-name-is-pascalcase** — An `Entity` must have a PascalCase `name`.
-- **enum-has-values** — An `Enum` must declare at least one value.
-- **invariant-id-unique** — An `Invariant` must have a unique `id` across the entire `Model`.
-- **scenario-touches-invariants** — A `Scenario` must list at least one valid invariant id in `invariants_touched`.
-
-### Author creates a model and lints it
-
-**Actors:** Author, Model, Linter, Schema, LintFinding
+**Actors:** Author, Skill, Model, Entity, Attribute, Enum, GlossaryTerm, Linter, Schema
 
 **Steps**
 
-1. An `Author` writes a `Model` declaring a `version` matching a known `Schema`.
-2. The `Author` runs `Model.lint`; the `Linter` executes `run` against the `Model`.
-3. The `Linter` applies structural checks first, then semantic, then completeness.
-4. Each issue is recorded as a `LintFinding` with a `severity` and `layer`.
+1. An `Author` describes concepts in plain language to a `Skill` (author).
+2. The `Skill` drafts a `Model` with `Entity`s, `Enum`s, and `GlossaryTerm`s.
+3. The `Author` reviews and refines; the `Skill` updates `Attribute`s and `Relationship`s.
+4. The `Skill` runs the `Linter` against the `Model` using the `Schema`.
 
 **Invariants touched**
 
 - **model-has-version** — Every `Model` declares a `version` matching a known `Schema` version.
+- **entity-has-definition** — Every `Entity` has a non-empty `definition`.
+- **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
 - **linter-three-layers** — Every lint run applies all three layers — structural, semantic, and completeness — in that order. Structural errors block semantic checks.
 - **schema-struct-sync** — Every property in the `Schema` has a matching Go struct field and vice versa, enforced by TestSchemaStructSync.
+- **skill-shells-to-cli** — A `Skill` shells out to the `modelith` binary — it is not a library and does not embed the engine. The binary must be installed separately.
 
-### Model imports a dependency
+### Linter catches a dangling reference
 
-**Actors:** Author, Model, Import, Source
+**Actors:** Author, Model, Relationship, Entity, Linter, LintFinding
 
 **Steps**
 
-1. An `Author` adds an `Import` declaration to a `Model`, pointing at a `Source` with a GitHub URL pinned to a tag.
-2. The `Author` runs `Import.fetch`; the tool fetches the remote `Model` and vendors it under `.modelith/deps/`.
-3. Provenance headers are stamped into the vendored copy: the `Source` URL, the pinned ref, and a content digest.
-4. A subsequent `Model.lint` resolves cross-model references (`scope.Name`) against the vendored `Import`.
+1. An `Author` writes a `Relationship` whose target `Entity` is misspelled.
+2. The `Linter` runs structural checks — the YAML parses.
+3. The `Linter` runs semantic checks and finds the dangling target.
+4. A `LintFinding` with `severity` = error and `layer` = semantic is produced; the linter exits non-zero.
 
 **Invariants touched**
 
-- **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
-- **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
-- **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **relationship-target-exists** — A `Relationship`'s target `Entity` must be declared in the same `Model`.
+- **finding-has-severity** — Every `LintFinding` has exactly one `severity`.
+- **linter-exit-code** — The `Linter` exits non-zero when there are errors; warnings and gaps do not affect the exit code unless `--completeness error` is set.
+- **linter-three-layers** — Every lint run applies all three layers — structural, semantic, and completeness — in that order. Structural errors block semantic checks.
 
 ### Renderer produces a document
 
-**Actors:** Author, Model, Renderer, Document
+**Actors:** Author, Model, Renderer, Document, Invariant, Scenario
 
 **Steps**
 
-1. An `Author` has a `Model` that passes `Model.lint` with no errors.
-2. The `Author` runs `Model.render`; the `Renderer` generates a `Document` — a Markdown file with an embedded Mermaid `erDiagram`.
-3. The `Document` contains every `Entity`, `Invariant`, and `Scenario` from the `Model`.
-4. The `Author` commits the `Document` alongside the `Model`.
+1. An `Author` has a `Model` that passes lint with no errors.
+2. The `Author` runs render; the `Renderer` generates a `Document` — a Markdown file with every `Entity`, `Invariant`, and `Scenario`, plus an embedded Mermaid `erDiagram`.
+3. The `Author` commits the `Document` alongside the `Model`.
 
 **Invariants touched**
 
@@ -525,17 +601,100 @@ erDiagram
 
 ### CI detects document drift
 
-**Actors:** Contributor, Document, Renderer, Model
+**Actors:** Contributor, GitHubAction, Renderer, Document, Model
 
 **Steps**
 
 1. A `Contributor` edits only the `Model` and forgets to regenerate the `Document`.
-2. CI runs `Renderer.check`, which regenerates the `Document` from the `Model` and compares it to the committed copy.
+2. The `GitHubAction` runs `render --check`, which regenerates the `Document` and compares it to the committed copy.
 3. The check fails because the committed `Document` is stale.
-4. The `Contributor` runs `Model.render` to regenerate the `Document` and commits it; the check passes.
+4. The `Contributor` runs render and commits the regenerated `Document`; the check passes.
 
 **Invariants touched**
 
 - **document-never-hand-edited** — A `Document` is generated exclusively by the `Renderer`; hand edits are detected by `render --check` and rejected in CI.
 - **renderer-output-matches-model** — A `Document` produced by the `Renderer` reflects the current state of the `Model` — every `Entity`, `Invariant`, and `Scenario` is present.
+- **action-version-pinned** — The `GitHubAction` downloads a specific pinned release — it does not build from source. After a release, `action.yml`'s default version must be bumped.
+
+### Model imports shared vocabulary
+
+**Actors:** Author, Model, Import, Source, Attribute, Enum
+
+**Steps**
+
+1. An `Author` adds an `Import` declaration to a `Model`, pointing at a `Source` with a GitHub URL pinned to a tag.
+2. The tool fetches the remote `Model` and vendors it under `.modelith/deps/`.
+3. Provenance headers are stamped into the vendored copy: the `Source` URL, the pinned ref, and a content digest.
+4. A subsequent lint run resolves cross-model references (`scope.Name`) against the vendored `Import`.
+
+**Invariants touched**
+
+- **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
+- **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
+- **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
+
+### Example is a golden fixture
+
+**Actors:** Contributor, Example, Renderer, Document, Linter
+
+**Steps**
+
+1. A `Contributor` changes the `Renderer`'s output format.
+2. The `Example`'s committed `Document` no longer matches the new output.
+3. `task render-check` and TestGoldenExample both fail — the golden fixture has drifted.
+4. The `Contributor` regenerates the `Document` and commits it; both checks pass.
+
+**Invariants touched**
+
+- **example-lints-clean** — The `Example` must lint clean under `task lint-models` — strict mode, where completeness gaps are errors.
+- **example-md-is-golden** — The `Example`'s `.md` is a golden fixture — it must match the `Renderer`'s output exactly, enforced by TestGoldenExample and `task render-check`.
+- **renderer-output-matches-model** — A `Document` produced by the `Renderer` reflects the current state of the `Model` — every `Entity`, `Invariant`, and `Scenario` is present.
+
+### Action preserves invariants
+
+**Actors:** Author, Action, Invariant, Entity, Linter
+
+**Steps**
+
+1. An `Author` defines an `Action` on an `Entity` with a `preserves` list referencing two `Invariant` ids.
+2. The `Linter` checks that every id in the list resolves to a declared `Invariant`.
+3. One id is misspelled; the `Linter` produces an error-level `LintFinding`.
+4. The `Author` fixes the id; the check passes.
+
+**Invariants touched**
+
+- **action-preserves-resolves** — Every `Invariant` id in an `Action`'s preserves list resolves to a declared `Invariant` — a dangling id is an error.
+- **action-actor-resolves** — An `Action`'s actor is a declared `Entity` or `GlossaryTerm` — an undefined actor warns.
+- **invariant-id-unique** — An `Invariant`'s id is unique across the entire `Model` — entity-level and model-level invariants share one namespace.
+- **relationship-not-both-owned** — A reciprocal `Relationship` pair cannot have both ends claiming `ownership: owned` — at most one end owns the relationship.
+
+### Schema evolves with a new version
+
+**Actors:** Contributor, Schema, Model
+
+**Steps**
+
+1. A `Contributor` adds a new feature to the format that requires a new `Schema` version.
+2. A new directory `internal/schema/v2/` is created with the updated schema; the v1 `Schema` is untouched.
+3. `Model`s declaring `version: v1` continue to validate against v1; new `Model`s can opt into v2.
+
+**Invariants touched**
+
+- **schema-version-immutable** — A shipped `Schema` version is never mutated; format evolution adds a new version directory.
+- **schema-struct-sync** — Every property in the `Schema` has a matching Go struct field and vice versa, enforced by TestSchemaStructSync.
+
+### A decision is recorded as an ADR
+
+**Actors:** Contributor, ADR
+
+**Steps**
+
+1. A `Contributor` makes a hard-to-reverse call — e.g. whether to support a new host for `Import`s.
+2. An `ADR` is written in `project-docs/adr/` recording the context, the decision, and the rationale.
+3. The `ADR` is committed alongside the code change it describes.
+
+**Invariants touched**
+
+- **adr-forward-looking** — An `ADR` records a decision made before or during implementation — it is forward-looking, not a retrospective audit.
 

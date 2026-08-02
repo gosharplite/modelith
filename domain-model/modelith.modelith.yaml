@@ -3,10 +3,13 @@ kind: DomainModel
 version: v1
 title: Modelith
 description: >-
-  The tooling that authors, validates, and renders domain models. This model
-  describes modelith's own domain — the concepts a contributor or agent needs
-  to navigate the codebase — so it covers both the format (what goes into a
-  `Model`) and the engine (what processes one).
+  Tooling for authoring domain models by conversation. An `Author` describes
+  concepts in plain language to a `Skill`, which drafts the `Model` YAML. The
+  `Linter` validates it against a `Schema`; the `Renderer` produces a
+  `Document` committed alongside it. A `GitHubAction` enforces both in CI.
+  A `Model` can `Import` vocabulary from other repos, pinned to a ref with
+  provenance. The `Example` golden fixture pins the renderer's output;
+  `ADR`s record the decisions that shaped the tool.
 
 glossary:
   Author: >-
@@ -52,13 +55,25 @@ enums:
       - name: mermaid
         definition: A standalone `erDiagram` block, used when the diagram is needed on its own.
 
+  SkillName:
+    description: The three skills shipped in the Claude Code plugin.
+    values:
+      - name: author
+        definition: domain-model-author — drives the conversation that produces a `Model`.
+      - name: lint
+        definition: domain-model-lint — runs the linter and interprets findings for the user.
+      - name: context
+        definition: domain-model-context — loads a model as context before a coding task.
+
 entities:
+  # ── Core artifact ────────────────────────────────────────────────
+
   Model:
     definition: >-
       A `*.modelith.yaml` file — the canonical, plain-language source of truth
       for a domain. It declares `Entity`s, `Enum`s, `Scenario`s, and
       `GlossaryTerm`s, plus model-level `Invariant`s. A `Model` may `Import`
-      other `Model`s to share vocabulary.
+      other `Model`s to share vocabulary across repos.
     relationships:
       - entity: Entity
         cardinality: 1:n
@@ -108,6 +123,8 @@ entities:
       - id: model-has-at-least-one-entity
         statement: A `Model` has at least one `Entity` — an empty model describes nothing.
 
+  # ── Format concepts (what goes inside a Model) ───────────────────
+
   Entity:
     definition: >-
       A named concept within a `Model`. It carries a prose `definition`, typed
@@ -132,8 +149,12 @@ entities:
         type: string
         description: Canonical PascalCase identifier (e.g. `ParkingSpot`, not `parking_spot`).
     invariants:
-      - id: entity-name-is-pascalcase
-        statement: An `Entity` must have a PascalCase `name`.
+      - id: entity-name-pascal-case
+        statement: >-
+          An `Entity` name is PascalCase, at least two characters, with no
+          underscores or hyphens.
+      - id: entity-has-definition
+        statement: Every `Entity` has a non-empty `definition`.
 
   Attribute:
     definition: >-
@@ -162,8 +183,15 @@ entities:
         type: string
         description: Prose explanation of how the value is computed; required when `derived` is true.
     invariants:
-      - id: derived-attribute-has-derivation
-        statement: An `Attribute` with `derived` set to true must provide a `derivation` string.
+      - id: attribute-type-resolves
+        statement: >-
+          An `Attribute`'s type is a lowercase primitive, the PascalCase name
+          of a defined `Enum`, or a well-formed `scope.Name` cross-model
+          reference.
+      - id: attribute-derived-needs-derivation
+        statement: >-
+          An `Attribute` marked `derived` must provide a `derivation`
+          explaining how the value is computed.
 
   Relationship:
     definition: >-
@@ -193,8 +221,18 @@ entities:
         type: string
         description: Prose detail that doesn't fit in a short `role` label.
     invariants:
-      - id: relationship-valid-cardinality
-        statement: A `Relationship` must have a `cardinality` of 1:1, 1:n, n:1, or n:n.
+      - id: relationship-cardinality-exact
+        statement: >-
+          A `Relationship`'s cardinality is exactly one of `1:1`, `1:n`, `n:1`,
+          or `n:n`.
+      - id: relationship-target-exists
+        statement: >-
+          A `Relationship`'s target `Entity` must be declared in the same
+          `Model`.
+      - id: relationship-not-both-owned
+        statement: >-
+          A reciprocal `Relationship` pair cannot have both ends claiming
+          `ownership: owned` — at most one end owns the relationship.
 
   Invariant:
     definition: >-
@@ -222,7 +260,11 @@ entities:
         description: The rule stated in prose, with entities backticked.
     invariants:
       - id: invariant-id-unique
-        statement: An `Invariant` must have a unique `id` across the entire `Model`.
+        statement: >-
+          An `Invariant`'s id is unique across the entire `Model` — entity-level
+          and model-level invariants share one namespace.
+      - id: invariant-id-kebab-case
+        statement: An `Invariant`'s id is lowercase kebab-case.
 
   Action:
     definition: >-
@@ -248,8 +290,14 @@ entities:
         type: string
         description: Prose explanation of what the action does.
     invariants:
-      - id: action-actor-defined
-        statement: An `Action` must specify an `actor` that is a valid `Entity` or `GlossaryTerm`.
+      - id: action-actor-resolves
+        statement: >-
+          An `Action`'s actor is a declared `Entity` or `GlossaryTerm` — an
+          undefined actor warns.
+      - id: action-preserves-resolves
+        statement: >-
+          Every `Invariant` id in an `Action`'s preserves list resolves to a
+          declared `Invariant` — a dangling id is an error.
 
   Enum:
     definition: >-
@@ -269,7 +317,10 @@ entities:
         description: What the enum represents and where it applies.
     invariants:
       - id: enum-has-values
-        statement: An `Enum` must declare at least one value.
+        statement: An `Enum` declares at least one value.
+      - id: enum-value-has-name-and-definition
+        statement: >-
+          Every value in an `Enum` has both a `name` and a `definition`.
 
   Scenario:
     definition: >-
@@ -291,8 +342,12 @@ entities:
         type: string
         description: The `Invariant` ids this scenario exercises.
     invariants:
-      - id: scenario-touches-invariants
-        statement: A `Scenario` must list at least one valid invariant id in `invariants_touched`.
+      - id: scenario-has-steps
+        statement: A `Scenario` has at least one step.
+      - id: scenario-invariants-resolve
+        statement: >-
+          Every `Invariant` id in a `Scenario`'s invariants_touched resolves to
+          a declared `Invariant` — a dangling id is an error.
 
   GlossaryTerm:
     definition: >-
@@ -312,7 +367,9 @@ entities:
         description: Prose definition of what the term means in this domain.
     invariants:
       - id: glossary-term-has-definition
-        statement: A `GlossaryTerm` must have a non-empty `definition`.
+        statement: A `GlossaryTerm` has a non-empty `definition`.
+
+  # ── Engine (what processes a Model) ──────────────────────────────
 
   Schema:
     definition: >-
@@ -471,6 +528,8 @@ entities:
           A `Document` is committed to the same repository as its `Model`, so
           readers see the rendered form without running any tool.
 
+  # ── Dependencies (vendored models from other repos) ──────────────
+
   Import:
     definition: >-
       A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or
@@ -543,62 +602,146 @@ entities:
           Every `Source` has exactly one `host` — GitHub or ADO, never both and
           never neither. The host determines which CLI the transport layer uses.
 
-scenarios:
-  - name: Author defines the core structure of a model
-    actors: [Author, Model, GlossaryTerm, Enum, Entity, Attribute, Relationship, Action, Invariant, Scenario]
-    steps:
-      - An `Author` defines a `GlossaryTerm` and an `Enum` for shared vocabulary.
-      - The `Author` creates an `Entity` with a derived `Attribute`.
-      - The `Author` creates a second `Entity` and links them with a `Relationship`.
-      - The `Author` adds an `Action` to the entity performed by the `GlossaryTerm` actor.
-      - The `Author` adds an `Invariant` and a `Scenario` touching that invariant.
-      - The linter validates these structural elements.
-    invariants_touched:
-      - derived-attribute-has-derivation
-      - action-actor-defined
-      - relationship-valid-cardinality
-      - glossary-term-has-definition
-      - entity-name-is-pascalcase
-      - enum-has-values
-      - invariant-id-unique
-      - scenario-touches-invariants
+  # ── Ecosystem (how you use the tool) ─────────────────────────────
 
-  - name: Author creates a model and lints it
-    actors: [Author, Model, Linter, Schema, LintFinding]
+  Skill:
+    definition: >-
+      A Claude Code plugin skill that drives the authoring workflow. The three
+      skills — author, lint, context — are the primary interface to modelith;
+      they shell out to the `modelith` binary, which must be installed
+      separately.
+    relationships:
+      - entity: Model
+        cardinality: 1:n
+        ownership: referenced
+        note: The `Model`s the `Skill` authors, lints, or loads as context.
+      - entity: Linter
+        cardinality: n:1
+        ownership: referenced
+        note: The `Linter` the `Skill` shells out to.
+      - entity: Renderer
+        cardinality: n:1
+        ownership: referenced
+        note: The `Renderer` the `Skill` shells out to.
+    attributes:
+      - name: name
+        type: SkillName
+        description: Which of the three skills this is.
+    invariants:
+      - id: skill-shells-to-cli
+        statement: >-
+          A `Skill` shells out to the `modelith` binary — it is not a library
+          and does not embed the engine. The binary must be installed
+          separately.
+
+  GitHubAction:
+    definition: >-
+      The GitHub Action (`action.yml`) that runs `modelith lint` and
+      `modelith render --check` in CI. It downloads a specific pinned release
+      of the CLI rather than building from source.
+    relationships:
+      - entity: Linter
+        cardinality: n:1
+        ownership: referenced
+        note: The `Linter` the `GitHubAction` invokes.
+      - entity: Renderer
+        cardinality: n:1
+        ownership: referenced
+        note: The `Renderer` the `GitHubAction` invokes with `--check`.
+    attributes:
+      - name: version
+        type: string
+        description: The pinned release tag the action downloads (e.g. `v0.1.0`).
+    invariants:
+      - id: action-version-pinned
+        statement: >-
+          The `GitHubAction` downloads a specific pinned release — it does not
+          build from source. After a release, `action.yml`'s default version
+          must be bumped.
+
+  Example:
+    definition: >-
+      The golden test fixture — `examples/example.modelith.yaml` and its
+      committed `.md`. It must lint clean under strict mode and its `.md` must
+      match the renderer's output exactly. Changes to the renderer or the
+      example require regenerating the `.md`.
+    relationships:
+      - entity: Model
+        cardinality: n:1
+        ownership: referenced
+        note: The `Example` is a `Model` with special constraints.
+      - entity: Document
+        cardinality: 1:1
+        ownership: owned
+        note: The committed `.md` is a golden fixture compared by TestGoldenExample.
+    invariants:
+      - id: example-lints-clean
+        statement: >-
+          The `Example` must lint clean under `task lint-models` — strict mode,
+          where completeness gaps are errors.
+      - id: example-md-is-golden
+        statement: >-
+          The `Example`'s `.md` is a golden fixture — it must match the
+          `Renderer`'s output exactly, enforced by TestGoldenExample and
+          `task render-check`.
+
+  ADR:
+    definition: >-
+      A forward-looking architecture decision record in `project-docs/adr/`.
+      Records a hard-to-reverse call with real trade-offs, so intentions stay
+      current. Retrospective records go in `project-docs/audits/` instead.
+    attributes:
+      - name: number
+        type: integer
+        description: The sequential ADR number (e.g. 9 for ADR-0009).
+      - name: title
+        type: string
+        description: Short human-facing title of the decision.
+    invariants:
+      - id: adr-forward-looking
+        statement: >-
+          An `ADR` records a decision made before or during implementation —
+          it is forward-looking, not a retrospective audit.
+
+scenarios:
+  - name: Author creates a model by conversation
+    actors: [Author, Skill, Model, Entity, Attribute, Enum, GlossaryTerm, Linter, Schema]
     steps:
-      - An `Author` writes a `Model` declaring a `version` matching a known `Schema`.
-      - The `Author` runs `Model.lint`; the `Linter` executes `run` against the `Model`.
-      - The `Linter` applies structural checks first, then semantic, then completeness.
-      - Each issue is recorded as a `LintFinding` with a `severity` and `layer`.
+      - An `Author` describes concepts in plain language to a `Skill` (author).
+      - The `Skill` drafts a `Model` with `Entity`s, `Enum`s, and
+        `GlossaryTerm`s.
+      - The `Author` reviews and refines; the `Skill` updates `Attribute`s and
+        `Relationship`s.
+      - The `Skill` runs the `Linter` against the `Model` using the `Schema`.
     invariants_touched:
       - model-has-version
+      - entity-has-definition
+      - attribute-type-resolves
       - linter-three-layers
       - schema-struct-sync
+      - skill-shells-to-cli
 
-  - name: Model imports a dependency
-    actors: [Author, Model, Import, Source]
+  - name: Linter catches a dangling reference
+    actors: [Author, Model, Relationship, Entity, Linter, LintFinding]
     steps:
-      - An `Author` adds an `Import` declaration to a `Model`, pointing at a
-        `Source` with a GitHub URL pinned to a tag.
-      - The `Author` runs `Import.fetch`; the tool fetches the remote `Model`
-        and vendors it under `.modelith/deps/`.
-      - "Provenance headers are stamped into the vendored copy: the `Source` URL,
-        the pinned ref, and a content digest."
-      - A subsequent `Model.lint` resolves cross-model references (`scope.Name`)
-        against the vendored `Import`.
+      - An `Author` writes a `Relationship` whose target `Entity` is misspelled.
+      - The `Linter` runs structural checks — the YAML parses.
+      - The `Linter` runs semantic checks and finds the dangling target.
+      - A `LintFinding` with `severity` = error and `layer` = semantic is
+        produced; the linter exits non-zero.
     invariants_touched:
-      - import-pinned-to-ref
-      - import-has-provenance
-      - source-host-unambiguous
+      - relationship-target-exists
+      - finding-has-severity
+      - linter-exit-code
+      - linter-three-layers
 
   - name: Renderer produces a document
-    actors: [Author, Model, Renderer, Document]
+    actors: [Author, Model, Renderer, Document, Invariant, Scenario]
     steps:
-      - An `Author` has a `Model` that passes `Model.lint` with no errors.
-      - The `Author` runs `Model.render`; the `Renderer` generates a `Document`
-        — a Markdown file with an embedded Mermaid `erDiagram`.
-      - The `Document` contains every `Entity`, `Invariant`, and `Scenario`
-        from the `Model`.
+      - An `Author` has a `Model` that passes lint with no errors.
+      - The `Author` runs render; the `Renderer` generates a `Document` — a
+        Markdown file with every `Entity`, `Invariant`, and `Scenario`, plus an
+        embedded Mermaid `erDiagram`.
       - The `Author` commits the `Document` alongside the `Model`.
     invariants_touched:
       - renderer-output-matches-model
@@ -606,18 +749,90 @@ scenarios:
       - lint-before-render
 
   - name: CI detects document drift
-    actors: [Contributor, Document, Renderer, Model]
+    actors: [Contributor, GitHubAction, Renderer, Document, Model]
     steps:
       - A `Contributor` edits only the `Model` and forgets to regenerate the
         `Document`.
-      - CI runs `Renderer.check`, which regenerates the `Document` from the
-        `Model` and compares it to the committed copy.
+      - The `GitHubAction` runs `render --check`, which regenerates the
+        `Document` and compares it to the committed copy.
       - The check fails because the committed `Document` is stale.
-      - The `Contributor` runs `Model.render` to regenerate the `Document`
-        and commits it; the check passes.
+      - The `Contributor` runs render and commits the regenerated `Document`;
+        the check passes.
     invariants_touched:
       - document-never-hand-edited
       - renderer-output-matches-model
+      - action-version-pinned
+
+  - name: Model imports shared vocabulary
+    actors: [Author, Model, Import, Source, Attribute, Enum]
+    steps:
+      - An `Author` adds an `Import` declaration to a `Model`, pointing at a
+        `Source` with a GitHub URL pinned to a tag.
+      - The tool fetches the remote `Model` and vendors it under
+        `.modelith/deps/`.
+      - "Provenance headers are stamped into the vendored copy: the `Source`
+        URL, the pinned ref, and a content digest."
+      - A subsequent lint run resolves cross-model references (`scope.Name`)
+        against the vendored `Import`.
+    invariants_touched:
+      - import-pinned-to-ref
+      - import-has-provenance
+      - source-host-unambiguous
+      - attribute-type-resolves
+
+  - name: Example is a golden fixture
+    actors: [Contributor, Example, Renderer, Document, Linter]
+    steps:
+      - A `Contributor` changes the `Renderer`'s output format.
+      - The `Example`'s committed `Document` no longer matches the new output.
+      - "`task render-check` and TestGoldenExample both fail — the golden
+        fixture has drifted."
+      - The `Contributor` regenerates the `Document` and commits it; both
+        checks pass.
+    invariants_touched:
+      - example-lints-clean
+      - example-md-is-golden
+      - renderer-output-matches-model
+
+  - name: Action preserves invariants
+    actors: [Author, Action, Invariant, Entity, Linter]
+    steps:
+      - An `Author` defines an `Action` on an `Entity` with a `preserves` list
+        referencing two `Invariant` ids.
+      - The `Linter` checks that every id in the list resolves to a declared
+        `Invariant`.
+      - One id is misspelled; the `Linter` produces an error-level
+        `LintFinding`.
+      - The `Author` fixes the id; the check passes.
+    invariants_touched:
+      - action-preserves-resolves
+      - action-actor-resolves
+      - invariant-id-unique
+      - relationship-not-both-owned
+
+  - name: Schema evolves with a new version
+    actors: [Contributor, Schema, Model]
+    steps:
+      - A `Contributor` adds a new feature to the format that requires a new
+        `Schema` version.
+      - A new directory `internal/schema/v2/` is created with the updated
+        schema; the v1 `Schema` is untouched.
+      - "`Model`s declaring `version: v1` continue to validate against v1;
+        new `Model`s can opt into v2."
+    invariants_touched:
+      - schema-version-immutable
+      - schema-struct-sync
+
+  - name: A decision is recorded as an ADR
+    actors: [Contributor, ADR]
+    steps:
+      - A `Contributor` makes a hard-to-reverse call — e.g. whether to support
+        a new host for `Import`s.
+      - An `ADR` is written in `project-docs/adr/` recording the context, the
+        decision, and the rationale.
+      - The `ADR` is committed alongside the code change it describes.
+    invariants_touched:
+      - adr-forward-looking
 
 invariants:
   - id: lint-before-render
