@@ -375,10 +375,10 @@ func guardTarget(target string, src Source) (replaced bool, err error) {
 }
 
 // splitHint explains the one way ParseSource can be wrong about a URL it
-// accepted. A GitHub browse URL gives no way to tell where a ref containing a
-// slash ends and the path begins, so the split is taken at the first segment;
-// a failed fetch is where that guess surfaces, as a 404. ADO URLs carry the
-// ref in a query parameter, so this ambiguity does not arise.
+// accepted. For GitHub sources, a browse URL gives no way to tell where a ref
+// containing a slash ends and the path begins, so the split is taken at the
+// first segment; a failed fetch is where that guess surfaces, as a 404. ADO
+// URLs carry the ref in a query parameter, so this ambiguity does not arise.
 //
 // It is offered only for that failure. A missing tool, a rejected credential,
 // an unreachable network — none of those say anything about the URL.
