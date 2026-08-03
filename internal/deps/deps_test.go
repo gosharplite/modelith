@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1194,5 +1195,52 @@ func TestImport_WithTimeoutBoundsEachCall(t *testing.T) {
 		if time.Until(d) > time.Minute {
 			t.Errorf("call %d deadline %v is later than the %v bound", i, d, time.Minute)
 		}
+	}
+}
+
+// TestExecRunner_KillsTheWholeProcessGroup pins the fix for the macOS stall
+// (issue #2): CommandContext's default kill sends SIGKILL only to the direct
+// child, so a CLI that spawned a helper leaves that helper holding the stdout
+// pipe — Wait then blocks past the deadline. Killing the process group closes
+// the pipe and the call returns. Here the direct child (sh) is waiting on a
+// backgrounded sleep: killing only sh would leave sleep holding the pipe for
+// its full 30s.
+func TestExecRunner_KillsTheWholeProcessGroup(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := (ExecRunner{}).Run(ctx, "sh", "-c", "sleep 30 & wait")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Run blocked %v after the deadline — the process group was not killed", elapsed)
+	}
+}
+
+// TestExecRunner_WaitDelayBoundsAPipeHeldByAStrayChild pins the belt-and-
+// braces half of the fix: even if a helper escapes the process group, the
+// stdout pipe it inherited cannot hold Wait hostage past WaitDelay. The shell
+// exits immediately; the backgrounded sleep inherits the stdout pipe and keeps
+// it open for 30s. WaitDelay must make Run return long before that.
+func TestExecRunner_WaitDelayBoundsAPipeHeldByAStrayChild(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+
+	start := time.Now()
+	_, err := (ExecRunner{}).Run(context.Background(), "sh", "-c", "sleep 30 &")
+	if err == nil {
+		t.Fatal("expected an error (WaitDelay abandoned the held pipe), got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Run blocked %v on a pipe held by a stray child", elapsed)
 	}
 }
