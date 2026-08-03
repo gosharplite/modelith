@@ -31,7 +31,7 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 	f.calls = append(f.calls, append([]string{name}, args...))
 
 	if f.ado {
-		return f.runAdo(name, args)
+		return f.runAz(args)
 	}
 	return f.runGh(args)
 }
@@ -55,59 +55,44 @@ func (f *fakeRunner) runGh(args []string) ([]byte, error) {
 	return nil, fmt.Errorf("gh: unexpected endpoint %q", endpoint)
 }
 
-func (f *fakeRunner) runAdo(name string, args []string) ([]byte, error) {
-	// Token fetch: az account get-access-token --resource ... --query accessToken -o tsv
-	if name == "az" && len(args) >= 2 && args[0] == "account" && args[1] == "get-access-token" {
-		var resource string
-		for i, a := range args {
-			if a == "--resource" && i+1 < len(args) {
-				resource = args[i+1]
-			}
+func (f *fakeRunner) runAz(args []string) ([]byte, error) {
+	var uri, resource string
+	for i, a := range args {
+		if a == "--uri" && i+1 < len(args) {
+			uri = args[i+1]
 		}
-		if resource != adoResourceID {
-			return nil, fmt.Errorf("az: expected --resource %s, got %q", adoResourceID, resource)
+		if a == "--resource" && i+1 < len(args) {
+			resource = args[i+1]
 		}
-		return []byte("fake-token\n"), nil
 	}
-
-	// Content or commit fetch: curl -s -H "Authorization: Bearer <token>" <uri>
-	if name == "curl" {
-		var uri, authH string
-		for i, a := range args {
-			if a == "-H" && i+1 < len(args) {
-				authH = args[i+1]
-			}
-			if i == len(args)-1 && strings.HasPrefix(args[i], "https://") {
-				uri = args[i]
-			}
-		}
-		if !strings.HasPrefix(authH, "Authorization: Bearer ") {
-			return nil, fmt.Errorf("curl: expected Authorization header, got %q", authH)
-		}
-		if f.fail != "" && strings.Contains(uri, f.fail) {
-			return nil, fmt.Errorf("curl: HTTP 404: Not Found (%s)", uri)
-		}
-		switch {
-		case strings.Contains(uri, "/items"):
-			if strings.Contains(uri, "versionType") {
-				if !strings.Contains(uri, "versionType=branch") &&
-					!strings.Contains(uri, "versionType=tag") &&
-					!strings.Contains(uri, "versionType=commit") {
-					return nil, fmt.Errorf("curl: unexpected versionType in %q", uri)
-				}
-			}
-			return []byte(f.content), nil
-		case strings.Contains(uri, "/commits"):
-			// $top must not be shell-escaped — ExecRunner uses argv (no shell).
-			if strings.Contains(uri, "\\$top") {
-				return nil, fmt.Errorf("curl: $top is shell-escaped, but ExecRunner uses argv (no shell)")
-			}
-			return []byte(fmt.Sprintf(`{"value":[{"commitId":"%s"}]}`, f.sha) + "\n"), nil
-		}
-		return nil, fmt.Errorf("curl: unexpected uri %q", uri)
+	// The ADO resource ID must be present.
+	if resource != "499b84ac-1321-427f-aa17-267ca6975798" {
+		return nil, fmt.Errorf("az: expected --resource 499b84ac-1321-427f-aa17-267ca6975798, got %q", resource)
 	}
-
-	return nil, fmt.Errorf("ado: unexpected command %q", name)
+	if f.fail != "" && strings.Contains(uri, f.fail) {
+		return nil, fmt.Errorf("az: HTTP 404: Not Found (%s)", uri)
+	}
+	switch {
+	case strings.Contains(uri, "/items"):
+		// Validate that a known version prefix produces the right versionType.
+		// GB→branch, GT→tag, GC→commit. When the prefix is absent or unknown,
+		// versionType is omitted (the API auto-detects).
+		if strings.Contains(uri, "versionType") {
+			if !strings.Contains(uri, "versionType=branch") &&
+				!strings.Contains(uri, "versionType=tag") &&
+				!strings.Contains(uri, "versionType=commit") {
+				return nil, fmt.Errorf("az: unexpected versionType in %q", uri)
+			}
+		}
+		return []byte(f.content), nil
+	case strings.Contains(uri, "/commits"):
+		// The commit endpoint must not shell-escape $top.
+		if strings.Contains(uri, "\\$top") {
+			return nil, fmt.Errorf("az: $top is shell-escaped, but ExecRunner uses argv (no shell)")
+		}
+		return []byte(f.sha + "\n"), nil
+	}
+	return nil, fmt.Errorf("az: unexpected uri %q", uri)
 }
 
 const upstream = `# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
@@ -839,38 +824,43 @@ func TestImport_ADO_StampsAVerifiableCopy(t *testing.T) {
 	}
 }
 
-func TestImport_ADO_CallsCurlWithTheExpectedEndpoints(t *testing.T) {
+func TestImport_ADO_CallsAzWithTheExpectedEndpoints(t *testing.T) {
 	t.Parallel()
 
 	r := adoRunner(adoContent, adoCommit)
 	if _, err := importAdoInto(t, t.TempDir(), r, adoBlobURL); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.calls) != 4 {
-		t.Fatalf("want 4 calls (token + items + token + commits), got %d: %+v", len(r.calls), r.calls)
+	if len(r.calls) != 2 {
+		t.Fatalf("want 2 az calls, got %d: %+v", len(r.calls), r.calls)
 	}
-	// Call 0: az account get-access-token
-	if r.calls[0][0] != "az" || r.calls[0][1] != "account" {
-		t.Errorf("call 0 should be az account get-access-token, got %v", r.calls[0])
-	}
-	// Call 1: curl items
-	if r.calls[1][0] != "curl" || !strings.Contains(r.calls[1][len(r.calls[1])-1], "/items") {
-		t.Errorf("call 1 should curl /items, got %v", r.calls[1])
-	}
-	// Call 2: curl commits
-	if r.calls[3][0] != "curl" || !strings.Contains(r.calls[3][len(r.calls[3])-1], "/commits") {
-		t.Errorf("call 3 should curl /commits, got %v", r.calls[3])
-	}
-}
-
-// findCurlURI returns the URI (last positional arg) from a curl call.
-func findCurlURI(args []string) string {
-	for i := len(args) - 1; i >= 0; i-- {
-		if strings.HasPrefix(args[i], "https://") {
-			return args[i]
+	// Find the --uri and --resource arguments in each call.
+	var foundContent, foundCommit, foundResource int
+	for _, call := range r.calls {
+		for i, a := range call {
+			if a == "--resource" && i+1 < len(call) && call[i+1] == adoResourceID {
+				foundResource++
+			}
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") {
+					foundContent++
+				}
+				if strings.Contains(uri, "/commits") {
+					foundCommit++
+				}
+			}
 		}
 	}
-	return ""
+	if foundResource != 2 {
+		t.Errorf("want 2 --resource flags, got %d", foundResource)
+	}
+	if foundContent == 0 {
+		t.Error("no az rest call with /items endpoint")
+	}
+	if foundCommit == 0 {
+		t.Error("no az rest call with /commits endpoint")
+	}
 }
 
 // TestImport_ADO_TagUsesVersionTypeTag pins that a GT (tag) URL produces
@@ -884,15 +874,16 @@ func TestImport_ADO_TagUsesVersionTypeTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, call := range r.calls {
-		uri := findCurlURI(call)
-		if uri == "" {
-			continue
-		}
-		if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=tag") {
-			t.Errorf("tag URL should produce versionType=tag, got %q", uri)
-		}
-		if strings.Contains(uri, "/commits") && !strings.Contains(uri, "versionType=tag") {
-			t.Errorf("tag URL should produce versionType=tag in commits call, got %q", uri)
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=tag") {
+					t.Errorf("tag URL should produce versionType=tag, got %q", uri)
+				}
+				if strings.Contains(uri, "/commits") && !strings.Contains(uri, "versionType=tag") {
+					t.Errorf("tag URL should produce versionType=tag in commits call, got %q", uri)
+				}
+			}
 		}
 	}
 }
@@ -908,12 +899,13 @@ func TestImport_ADO_CommitUsesVersionTypeCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, call := range r.calls {
-		uri := findCurlURI(call)
-		if uri == "" {
-			continue
-		}
-		if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=commit") {
-			t.Errorf("commit URL should produce versionType=commit, got %q", uri)
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "/items") && !strings.Contains(uri, "versionType=commit") {
+					t.Errorf("commit URL should produce versionType=commit, got %q", uri)
+				}
+			}
 		}
 	}
 }
@@ -937,15 +929,16 @@ func TestImport_ADO_OverrideRefOmitsVersionType(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, call := range r.calls {
-		uri := findCurlURI(call)
-		if uri == "" {
-			continue
-		}
-		if strings.Contains(uri, "versionType") {
-			t.Errorf("--ref override should omit versionType, got %q", uri)
-		}
-		if !strings.Contains(uri, "version=v1.0.0") {
-			t.Errorf("--ref override should use the override value in version=, got %q", uri)
+		for i, a := range call {
+			if a == "--uri" && i+1 < len(call) {
+				uri := call[i+1]
+				if strings.Contains(uri, "versionType") {
+					t.Errorf("--ref override should omit versionType, got %q", uri)
+				}
+				if !strings.Contains(uri, "version=v1.0.0") {
+					t.Errorf("--ref override should use the override value in version=, got %q", uri)
+				}
+			}
 		}
 	}
 }
