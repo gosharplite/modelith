@@ -1,15 +1,13 @@
 // Package deps acquires a model from another repository and stamps it as a
 // vendored copy.
 //
-// Every fetch is delegated to an external CLI — gh for GitHub, curl (with a
-// token from az account get-access-token) for Azure DevOps — executed as an
-// argv array and never through a shell, so this binary holds no TLS
-// configuration and no credentials (ADR-0011).
+// Every fetch is delegated to an external CLI — gh for GitHub, az for Azure
+// DevOps — executed as an argv array and never through a shell, so this
+// binary holds no TLS configuration and no credentials (ADR-0011).
 package deps
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -46,10 +44,10 @@ type ExecRunner struct{}
 // is folded into the returned error, because the CLI reports why it refused there.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	// nolint:gosec // G204 flags a variable command and arguments, which is
-	// what a transport seam is. The commands are the literals "gh", "az", and
-	// "curl" at the call sites; the arguments are literals plus endpoints
-	// assembled from URLs that ParseSource has already validated. Nothing here
-	// comes from a model file, and there is no shell: exec passes an argv array.
+	// what a transport seam is. The commands are the literals "gh" and "az" at
+	// the call sites; the arguments are literals plus endpoints assembled from
+	// URLs that ParseSource has already validated. Nothing here comes from a
+	// model file, and there is no shell: exec passes an argv array.
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -73,10 +71,30 @@ func installHint(name string) string {
 		return "; install it from https://cli.github.com and run `gh auth login`"
 	case "az":
 		return "; install it from https://aka.ms/azure-cli and run `az login`"
-	case "curl":
-		return "; install it from https://curl.se"
 	}
 	return ""
+}
+
+// timeoutRunner bounds each delegated command to timeout. It is a decorator on
+// the Runner seam: the deadline is enforced per command, so a slow-but-working
+// content fetch does not consume the commit fetch's budget.
+type timeoutRunner struct {
+	inner   Runner
+	timeout time.Duration
+}
+
+// Run derives a per-command deadline from the caller's context and abandons the
+// command when it expires. The error names the command and the bound and tells
+// the user how to adjust it; it deliberately does not echo the argv, so a URI
+// cannot leak into logs through this path.
+func (r timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	out, err := r.inner.Run(ctx, name, args...)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%s did not finish within %s — the fetch was abandoned (raise it with --timeout if this is a slow but legitimate fetch)", name, r.timeout)
+	}
+	return out, err
 }
 
 // Source is a model file in another repository, as an origin URL parsed into
@@ -227,6 +245,10 @@ type Options struct {
 	Ref string
 	// Now stamps the header's imported date, in local time.
 	Now time.Time
+	// Timeout bounds each delegated command (gh, az) individually. Zero means
+	// no bound: a hung CLI becomes a fast, actionable error instead of a
+	// silent wait.
+	Timeout time.Duration
 	// Run is the command seam; nil uses ExecRunner.
 	Run Runner
 }
@@ -261,6 +283,9 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 	runner := opts.Run
 	if runner == nil {
 		runner = ExecRunner{}
+	}
+	if opts.Timeout > 0 {
+		runner = timeoutRunner{inner: runner, timeout: opts.Timeout}
 	}
 
 	var content []byte
@@ -448,10 +473,11 @@ func escapePath(p string) string {
 	return strings.Join(segments, "/")
 }
 
-// --- Azure DevOps transport (curl) ---
+// --- Azure DevOps transport (az rest) ---
 
-// adoResourceID is the Azure DevOps application ID that `az account
-// get-access-token` needs to request an AAD token with the correct audience.
+// adoResourceID is the Azure DevOps application ID that az rest needs to
+// request an AAD token with the correct audience when the URL alone doesn't
+// let it derive one.
 const adoResourceID = "499b84ac-1321-427f-aa17-267ca6975798"
 
 // adoVersionType returns the versionDescriptor.versionType for a Source. When
@@ -465,29 +491,9 @@ func adoVersionType(src Source) string {
 	return ""
 }
 
-// adoToken returns a short-lived AAD bearer token for the Azure DevOps
-// application by delegating to `az account get-access-token`.
-func adoToken(ctx context.Context, runner Runner) (string, error) {
-	out, err := runner.Run(ctx, "az", "account", "get-access-token",
-		"--resource", adoResourceID, "--query", "accessToken", "-o", "tsv")
-	if err != nil {
-		return "", err
-	}
-	token := strings.TrimSpace(string(out))
-	if token == "" {
-		return "", fmt.Errorf("az account get-access-token returned an empty token — run 'az login' first")
-	}
-	return token, nil
-}
-
-// fetchContentADO fetches the file content from Azure DevOps by getting an
-// AAD token from the az CLI, then calling the items API with curl. Auth is
-// never stored in this process.
+// fetchContentADO fetches the file content from Azure DevOps by delegating to
+// `az rest`. Auth is handled by the az CLI.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
-	token, err := adoToken(ctx, runner)
-	if err != nil {
-		return nil, err
-	}
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",
 		url.PathEscape(src.Owner), url.PathEscape(src.Project),
@@ -497,7 +503,8 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 		uri += "&versionDescriptor.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "curl", "-s", "-H", "Authorization: Bearer "+token, uri)
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri)
 	if err != nil {
 		return nil, err
 	}
@@ -505,13 +512,8 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 }
 
 // fetchCommitADO returns the commit that last touched the file at the given
-// ref. It fetches a token from the az CLI, calls the commits API with curl,
-// and parses the JSON response in Go.
+// ref by delegating to `az rest`. Auth is handled by the az CLI.
 func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, error) {
-	token, err := adoToken(ctx, runner)
-	if err != nil {
-		return "", err
-	}
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/commits?searchCriteria.itemPath=%s&searchCriteria.itemVersion.version=%s&$top=1&api-version=7.1",
 		url.PathEscape(src.Owner), url.PathEscape(src.Project),
@@ -521,21 +523,16 @@ func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, err
 		uri += "&searchCriteria.itemVersion.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "curl", "-s", "-H", "Authorization: Bearer "+token, uri)
+	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri,
+		"--query", "value[0].commitId", "-o", "tsv")
 	if err != nil {
 		return "", err
 	}
-	var result struct {
-		Value []struct {
-			CommitID string `json:"commitId"`
-		} `json:"value"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return "", fmt.Errorf("parsing commits response from %s/%s/_git/%s: %w", src.Owner, src.Project, src.Repo, err)
-	}
-	if len(result.Value) == 0 || result.Value[0].CommitID == "" {
+	sha := strings.TrimSpace(string(out))
+	if sha == "" {
 		return "", fmt.Errorf("%s/%s/_git/%s has no commit touching %q at %q",
 			src.Owner, src.Project, src.Repo, src.Path, src.Ref)
 	}
-	return result.Value[0].CommitID, nil
+	return sha, nil
 }

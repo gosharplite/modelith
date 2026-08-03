@@ -109,7 +109,10 @@ that use the network; lint and render never do.`),
 }
 
 func depsImportCmd() *cobra.Command {
-	var ref string
+	var (
+		ref     string
+		timeout time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "import <url> [dir]",
 		Short: "Vendor a model from another repository",
@@ -124,6 +127,9 @@ and is verified against that header by every later lint.
 For GitHub, fetching is delegated to the gh CLI, which must be installed and
 authenticated. For Azure DevOps, fetching is delegated to the az CLI; run
 'az login' first.
+
+Each fetch is bounded by --timeout (default 60s, 0 disables the bound): a hung
+CLI fails fast instead of stalling the import.
 
 The imports list of the model that will reference this copy is yours to edit;
 this command prints the entry to add.`),
@@ -147,10 +153,11 @@ this command prints the entry to add.`),
 			}
 
 			res, err := deps.Import(cmd.Context(), deps.Options{
-				URL: args[0],
-				Dir: dir,
-				Ref: ref,
-				Now: time.Now(),
+				URL:     args[0],
+				Dir:     dir,
+				Ref:     ref,
+				Now:     time.Now(),
+				Timeout: timeout,
 			})
 			if err != nil {
 				return err
@@ -165,6 +172,8 @@ this command prints the entry to add.`),
 		},
 	}
 	cmd.Flags().StringVar(&ref, "ref", "", "ref to fetch, overriding the one in the URL (a tag pins the copy)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second,
+		"abandon a delegated fetch (gh/az) that exceeds this duration; 0 disables the bound")
 	return cmd
 }
 
