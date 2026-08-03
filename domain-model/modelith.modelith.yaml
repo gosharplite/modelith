@@ -581,7 +581,9 @@ entities:
       A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to
       a ref (branch, tag, or commit). The `Source` carries a host discriminator
       (HostGitHub or HostADO) so the transport layer can delegate to the
-      right CLI (`gh api` or `az rest`).
+      right CLI (`gh api` or `az rest`). For ADO sources, Project names the
+      Azure DevOps project and RefType records how the version parameter was
+      prefixed (GB/GT/GC), so the API call uses the right version descriptor.
     relationships:
       - entity: Import
         cardinality: 1:n
@@ -596,11 +598,27 @@ entities:
       - name: ref
         type: string
         description: The pinned ref (branch, tag, or commit) the source is locked to.
+      - name: project
+        type: string
+        description: >-
+          The Azure DevOps project name, extracted from the URL path
+          (`/org/project/_git/repo`). Empty for GitHub sources.
+      - name: refType
+        type: string
+        description: >-
+          The ADO version-type prefix parsed from the URL: `branch` (GB),
+          `tag` (GT), or `commit` (GC). Empty for GitHub sources and when
+          `--ref` overrides the URL's ref — the transport layer auto-detects.
     invariants:
       - id: source-host-unambiguous
         statement: >-
           Every `Source` has exactly one `host` — GitHub or ADO, never both and
           never neither. The host determines which CLI the transport layer uses.
+      - id: source-ref-override-clears-ref-type
+        statement: >-
+          When a `Source`'s ref is set by `--ref` rather than parsed from the
+          URL, RefType is empty — the transport layer auto-detects the ref
+          type rather than trusting the URL prefix that was overridden.
 
   # ── Ecosystem (how you use the tool) ─────────────────────────────
 
@@ -763,7 +781,7 @@ scenarios:
       - renderer-output-matches-model
       - action-version-pinned
 
-  - name: Model imports shared vocabulary
+  - name: Model imports shared vocabulary from GitHub
     actors: [Author, Model, Import, Source, Attribute, Enum]
     steps:
       - An `Author` adds an `Import` declaration to a `Model`, pointing at a
@@ -778,6 +796,24 @@ scenarios:
       - import-pinned-to-ref
       - import-has-provenance
       - source-host-unambiguous
+      - attribute-type-resolves
+
+  - name: Model imports shared vocabulary from Azure DevOps
+    actors: [Author, Model, Import, Source, Attribute, Enum]
+    steps:
+      - An `Author` adds an `Import` declaration pointing at a `Source` with an
+        Azure DevOps URL — a `_git` URL with `?path=...&version=GBmain`.
+      - ParseSource extracts the Project, RefType (`branch`), and the
+        repo path from the URL.
+      - The tool fetches the remote `Model` via `az rest` and stamps provenance
+        headers; the Ref is `main` and RefType is `branch`.
+      - The `Author` passes `--ref v1.0.0` to override the ref; RefType
+        resets to empty, and the API auto-detects the ref type.
+    invariants_touched:
+      - import-pinned-to-ref
+      - import-has-provenance
+      - source-host-unambiguous
+      - source-ref-override-clears-ref-type
       - attribute-type-resolves
 
   - name: Example is a golden fixture

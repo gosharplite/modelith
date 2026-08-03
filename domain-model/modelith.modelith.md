@@ -468,7 +468,7 @@ A Claude Code plugin skill that drives the authoring workflow. The three skills 
 
 ### `Source`
 
-A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to a ref (branch, tag, or commit). The `Source` carries a host discriminator (HostGitHub or HostADO) so the transport layer can delegate to the right CLI (`gh api` or `az rest`).
+A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to a ref (branch, tag, or commit). The `Source` carries a host discriminator (HostGitHub or HostADO) so the transport layer can delegate to the right CLI (`gh api` or `az rest`). For ADO sources, Project names the Azure DevOps project and RefType records how the version parameter was prefixed (GB/GT/GC), so the API call uses the right version descriptor.
 
 **Relationships**
 
@@ -481,10 +481,13 @@ A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to a ref (b
 | `host` | HostKind | Which remote platform this source points to. |
 | `url` | string | The full repository URL, including path and version query. |
 | `ref` | string | The pinned ref (branch, tag, or commit) the source is locked to. |
+| `project` | string | The Azure DevOps project name, extracted from the URL path (`/org/project/_git/repo`). Empty for GitHub sources. |
+| `refType` | string | The ADO version-type prefix parsed from the URL: `branch` (GB), `tag` (GT), or `commit` (GC). Empty for GitHub sources and when `--ref` overrides the URL's ref — the transport layer auto-detects. |
 
 **Invariants**
 
 - **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **source-ref-override-clears-ref-type** — When a `Source`'s ref is set by `--ref` rather than parsed from the URL, RefType is empty — the transport layer auto-detects the ref type rather than trusting the URL prefix that was overridden.
 
 ## Relationships
 
@@ -616,7 +619,7 @@ erDiagram
 - **renderer-output-matches-model** — A `Document` produced by the `Renderer` reflects the current state of the `Model` — every `Entity`, `Invariant`, and `Scenario` is present.
 - **action-version-pinned** — The `GitHubAction` downloads a specific pinned release — it does not build from source. After a release, `action.yml`'s default version must be bumped.
 
-### Model imports shared vocabulary
+### Model imports shared vocabulary from GitHub
 
 **Actors:** Author, Model, Import, Source, Attribute, Enum
 
@@ -632,6 +635,25 @@ erDiagram
 - **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
 - **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
 - **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
+
+### Model imports shared vocabulary from Azure DevOps
+
+**Actors:** Author, Model, Import, Source, Attribute, Enum
+
+**Steps**
+
+1. An `Author` adds an `Import` declaration pointing at a `Source` with an Azure DevOps URL — a `_git` URL with `?path=...&version=GBmain`.
+2. ParseSource extracts the Project, RefType (`branch`), and the repo path from the URL.
+3. The tool fetches the remote `Model` via `az rest` and stamps provenance headers; the Ref is `main` and RefType is `branch`.
+4. The `Author` passes `--ref v1.0.0` to override the ref; RefType resets to empty, and the API auto-detects the ref type.
+
+**Invariants touched**
+
+- **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
+- **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
+- **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **source-ref-override-clears-ref-type** — When a `Source`'s ref is set by `--ref` rather than parsed from the URL, RefType is empty — the transport layer auto-detects the ref type rather than trusting the URL prefix that was overridden.
 - **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
 
 ### Example is a golden fixture
