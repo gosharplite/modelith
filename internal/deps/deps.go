@@ -519,6 +519,12 @@ func adoVersionType(src Source) string {
 
 // fetchContentADO fetches the file content from Azure DevOps by delegating to
 // `az rest`. Auth is handled by the az CLI.
+//
+// The body is written to a temporary file with --output-file and read back
+// rather than taken from stdout: az rest appends a newline when it prints a
+// raw body to stdout, so the stdout form is not byte-identical to the origin
+// file — it drifts a trailing newline into the vendored copy and its digest
+// (ADR-0015). The --output-file form is the exact API response body.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",
@@ -529,12 +535,23 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 		uri += "&versionDescriptor.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
-		"--resource", adoResourceID, "--uri", uri)
+	tmp, err := os.CreateTemp("", "modelith-ado-*")
 	if err != nil {
+		return nil, fmt.Errorf("creating a temp file for the fetch: %w", err)
+	}
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return nil, fmt.Errorf("closing the temp file for the fetch: %w", err)
+	}
+	defer func() { _ = os.Remove(name) }()
+
+	if _, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri,
+		"--output-file", name); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return os.ReadFile(name)
 }
 
 // fetchCommitADO returns the commit that last touched the file at the given

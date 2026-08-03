@@ -85,6 +85,23 @@ func (f *fakeRunner) runAz(args []string) ([]byte, error) {
 				return nil, fmt.Errorf("az: unexpected versionType in %q", uri)
 			}
 		}
+		// The real fetch writes the body to --output-file (az rest appends a
+		// newline when printing a raw body to stdout, which would drift the
+		// vendored copy — see fetchContentADO). The fake must mirror that
+		// contract, so a test cannot pass while asserting an argv the real
+		// command would not produce.
+		var outPath string
+		for i, a := range args {
+			if a == "--output-file" && i+1 < len(args) {
+				outPath = args[i+1]
+			}
+		}
+		if outPath == "" {
+			return nil, fmt.Errorf("az: content fetch must use --output-file, got %q", args)
+		}
+		if err := os.WriteFile(outPath, []byte(f.content), 0o644); err != nil {
+			return nil, err
+		}
 		return []byte(f.content), nil
 	case strings.Contains(uri, "/commits"):
 		// The commit endpoint must not shell-escape $top.
