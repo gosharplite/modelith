@@ -1027,3 +1027,172 @@ func TestSplitHint_ADO(t *testing.T) {
 		t.Errorf("splitHint for ADO source should be empty, got %q", got)
 	}
 }
+
+// --- Timeout decorator tests ---
+
+// runnerFunc adapts a func to the Runner interface for tests.
+type runnerFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+func (f runnerFunc) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return f(ctx, name, args...)
+}
+
+// hungRunner blocks every call until the context Import gave it expires, the
+// way a stalled az/gh process behaves under exec.CommandContext.
+type hungRunner struct{ calls int }
+
+func (h *hungRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	h.calls++
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// ctxRecordingRunner records the context each call received, so a test can
+// assert what Import delivered: a deadline when Timeout is set, the caller's
+// bare ctx when it is zero.
+type ctxRecordingRunner struct {
+	fakeRunner
+	ctxs []context.Context
+}
+
+func (r *ctxRecordingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	r.ctxs = append(r.ctxs, ctx)
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// TestTimeoutRunner_ReturnsAClearErrorOnDeadline pins the decorator's contract:
+// a hung command becomes an error that names the command and the bound and says
+// how to raise it, and that never echoes the argv — defense in depth, since the
+// argv can carry URIs a caller would not want duplicated into error logs.
+func TestTimeoutRunner_ReturnsAClearErrorOnDeadline(t *testing.T) {
+	t.Parallel()
+
+	inner := runnerFunc(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	r := timeoutRunner{inner: inner, timeout: 10 * time.Millisecond}
+
+	_, err := r.Run(context.Background(), "az", "rest", "--uri", "https://dev.azure.com/secret/org/_apis/items")
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	for _, want := range []string{"az", "10ms", "--timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %q: %v", want, err)
+		}
+	}
+	for _, leaked := range []string{"rest", "--uri", "dev.azure.com/secret"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("the error echoes the argv (%q): %v", leaked, err)
+		}
+	}
+}
+
+// TestImport_TimeoutIsPerCommand pins that the bound applies to each command
+// individually, not to the whole import: a whole-import budget could let the
+// first call consume everything and fail on the second. A per-command deadline
+// fails at the first hung call, which is the one the user is waiting on.
+func TestImport_TimeoutIsPerCommand(t *testing.T) {
+	t.Parallel()
+
+	hung := &hungRunner{}
+	_, err := Import(context.Background(), Options{
+		URL:     blobURL,
+		Dir:     t.TempDir(),
+		Now:     time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run:     hung,
+		Timeout: 20 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "gh did not finish within") {
+		t.Errorf("the error should name the first command (gh), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--timeout") {
+		t.Errorf("the error should say how to adjust the bound, got: %v", err)
+	}
+	if hung.calls != 1 {
+		t.Errorf("the first hung call consumed the whole import; got %d calls, want 1", hung.calls)
+	}
+}
+
+// TestImport_ADO_TimeoutBoundsTheAzCall pins the fix this feature exists for:
+// a stalled az rest becomes a fast, actionable error naming az, not a silent
+// 75s wait on the commits-with-path query.
+func TestImport_ADO_TimeoutBoundsTheAzCall(t *testing.T) {
+	t.Parallel()
+
+	hung := &hungRunner{}
+	_, err := Import(context.Background(), Options{
+		URL:     adoBlobURL,
+		Dir:     t.TempDir(),
+		Now:     time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run:     hung,
+		Timeout: 20 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "az did not finish within") {
+		t.Errorf("the error should name az, got: %v", err)
+	}
+	if hung.calls != 1 {
+		t.Errorf("the first az call should fail alone; got %d calls", hung.calls)
+	}
+}
+
+// TestImport_ZeroTimeoutPassesTheCallerContextThrough pins that Options.Timeout
+// zero (the default) leaves the runner's context untouched: no deadline is
+// added, so the decorator is a no-op and existing behavior is unchanged.
+func TestImport_ZeroTimeoutPassesTheCallerContextThrough(t *testing.T) {
+	t.Parallel()
+
+	rec := &ctxRecordingRunner{fakeRunner: fakeRunner{content: upstream, sha: sha}}
+	if _, err := Import(context.Background(), Options{
+		URL:     blobURL,
+		Dir:     t.TempDir(),
+		Now:     time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run:     rec,
+		Timeout: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.ctxs) != 2 {
+		t.Fatalf("want 2 calls, got %d", len(rec.ctxs))
+	}
+	for i, ctx := range rec.ctxs {
+		if _, ok := ctx.Deadline(); ok {
+			t.Errorf("call %d received a deadline; Timeout 0 must pass the caller's ctx through", i)
+		}
+	}
+}
+
+// TestImport_WithTimeoutBoundsEachCall pins that Timeout > 0 applies the
+// decorator to every delegated command, and that a command that finishes within
+// the bound still succeeds.
+func TestImport_WithTimeoutBoundsEachCall(t *testing.T) {
+	t.Parallel()
+
+	rec := &ctxRecordingRunner{fakeRunner: fakeRunner{content: upstream, sha: sha}}
+	if _, err := Import(context.Background(), Options{
+		URL:     blobURL,
+		Dir:     t.TempDir(),
+		Now:     time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local),
+		Run:     rec,
+		Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, ctx := range rec.ctxs {
+		d, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("call %d received no deadline; Timeout %v should bound each call", i, time.Minute)
+			continue
+		}
+		if time.Until(d) > time.Minute {
+			t.Errorf("call %d deadline %v is later than the %v bound", i, d, time.Minute)
+		}
+	}
+}

@@ -75,6 +75,28 @@ func installHint(name string) string {
 	return ""
 }
 
+// timeoutRunner bounds each delegated command to timeout. It is a decorator on
+// the Runner seam: the deadline is enforced per command, so a slow-but-working
+// content fetch does not consume the commit fetch's budget.
+type timeoutRunner struct {
+	inner   Runner
+	timeout time.Duration
+}
+
+// Run derives a per-command deadline from the caller's context and abandons the
+// command when it expires. The error names the command and the bound and tells
+// the user how to adjust it; it deliberately does not echo the argv, so a URI
+// cannot leak into logs through this path.
+func (r timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	out, err := r.inner.Run(ctx, name, args...)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%s did not finish within %s — the fetch was abandoned (raise it with --timeout if this is a slow but legitimate fetch)", name, r.timeout)
+	}
+	return out, err
+}
+
 // Source is a model file in another repository, as an origin URL parsed into
 // the parts a fetch and a later refresh both need.
 type Source struct {
@@ -223,6 +245,10 @@ type Options struct {
 	Ref string
 	// Now stamps the header's imported date, in local time.
 	Now time.Time
+	// Timeout bounds each delegated command (gh, az) individually. Zero means
+	// no bound: a hung CLI becomes a fast, actionable error instead of a
+	// silent wait.
+	Timeout time.Duration
 	// Run is the command seam; nil uses ExecRunner.
 	Run Runner
 }
@@ -257,6 +283,9 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 	runner := opts.Run
 	if runner == nil {
 		runner = ExecRunner{}
+	}
+	if opts.Timeout > 0 {
+		runner = timeoutRunner{inner: runner, timeout: opts.Timeout}
 	}
 
 	var content []byte
