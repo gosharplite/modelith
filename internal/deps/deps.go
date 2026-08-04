@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stacklok/modelith/internal/model"
@@ -42,6 +43,14 @@ type ExecRunner struct{}
 
 // Run executes name with args and returns its standard output. Standard error
 // is folded into the returned error, because the CLI reports why it refused there.
+//
+// The child runs in its own process group and is killed as a group on context
+// cancellation. CommandContext alone kills only the direct child, and a CLI
+// like az that spawns a helper (token refresh, keychain) can leave that helper
+// holding the stdout/stderr pipe — Wait then blocks forever past the deadline,
+// which is the macOS stall this guards against. WaitDelay bounds that last
+// wait regardless, so a helper that escaped the group still cannot hold Wait
+// hostage.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	// nolint:gosec // G204 flags a variable command and arguments, which is
 	// what a transport seam is. The commands are the literals "gh" and "az" at
@@ -49,6 +58,17 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	// URLs that ParseSource has already validated. Nothing here comes from a
 	// model file, and there is no shell: exec passes an argv array.
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		// The negative pid names the process group, so a helper the CLI
+		// spawned dies with it instead of keeping the pipe open past the
+		// deadline. ESRCH is fine — the process may already be gone.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -91,7 +111,10 @@ func (r timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	out, err := r.inner.Run(ctx, name, args...)
-	if errors.Is(err, context.DeadlineExceeded) {
+	// ErrWaitDelay is the deadline's last line of defense: the direct child was
+	// killed, but a helper it spawned held the pipe past WaitDelay, so Wait
+	// abandoned it. It is the deadline surfacing, so report it as one.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("%s did not finish within %s — the fetch was abandoned (raise it with --timeout if this is a slow but legitimate fetch)", name, r.timeout)
 	}
 	return out, err
@@ -295,19 +318,22 @@ func Import(ctx context.Context, opts Options) (*Result, error) {
 		// ADO fetch delegates to the az CLI.
 		content, err = fetchContentADO(ctx, runner, src)
 		if err != nil {
-			return nil, fmt.Errorf("%w%s", err, splitHint(src, err))
+			return nil, fmt.Errorf("fetching content: %w%s", err, splitHint(src, err))
 		}
 		commit, err = fetchCommitADO(ctx, runner, src)
+		if err != nil {
+			return nil, fmt.Errorf("fetching commit: %w", err)
+		}
 	} else {
 		// GitHub fetch delegates to the gh CLI.
 		content, err = fetchContent(ctx, runner, src)
 		if err != nil {
-			return nil, fmt.Errorf("%w%s", err, splitHint(src, err))
+			return nil, fmt.Errorf("fetching content: %w%s", err, splitHint(src, err))
 		}
 		commit, err = fetchCommit(ctx, runner, src)
-	}
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, fmt.Errorf("fetching commit: %w", err)
+		}
 	}
 
 	if provenance.Present(content) {
@@ -493,6 +519,12 @@ func adoVersionType(src Source) string {
 
 // fetchContentADO fetches the file content from Azure DevOps by delegating to
 // `az rest`. Auth is handled by the az CLI.
+//
+// The body is written to a temporary file with --output-file and read back
+// rather than taken from stdout: az rest appends a newline when it prints a
+// raw body to stdout, so the stdout form is not byte-identical to the origin
+// file — it drifts a trailing newline into the vendored copy and its digest
+// (ADR-0015). The --output-file form is the exact API response body.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",
@@ -503,12 +535,23 @@ func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, er
 		uri += "&versionDescriptor.versionType=" + url.QueryEscape(vt)
 	}
 
-	out, err := runner.Run(ctx, "az", "rest", "--method", "get",
-		"--resource", adoResourceID, "--uri", uri)
+	tmp, err := os.CreateTemp("", "modelith-ado-*")
 	if err != nil {
+		return nil, fmt.Errorf("creating a temp file for the fetch: %w", err)
+	}
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return nil, fmt.Errorf("closing the temp file for the fetch: %w", err)
+	}
+	defer func() { _ = os.Remove(name) }()
+
+	if _, err := runner.Run(ctx, "az", "rest", "--method", "get",
+		"--resource", adoResourceID, "--uri", uri,
+		"--output-file", name); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return os.ReadFile(name)
 }
 
 // fetchCommitADO returns the commit that last touched the file at the given
