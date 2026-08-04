@@ -28,14 +28,18 @@ enums:
         definition: An Azure DevOps (dev.azure.com) repository; transport delegates to `az rest`.
 
   FindingSeverity:
-    description: The classification of a `LintFinding`.
+    description: The classification of a `LintFinding` — how seriously it blocks a build.
     values:
       - name: error
-        definition: Must fix; the model is structurally or semantically invalid.
+        definition: >-
+          Must fix; the model is structurally or semantically invalid, and the
+          lint run exits non-zero.
       - name: warning
-        definition: Likely a bug — e.g. a dangling reference or ambiguous name.
-      - name: gap
-        definition: Advisory completeness gap — e.g. an entity with no invariants.
+        definition: >-
+          Does not block on its own — either a likely bug (e.g. a dangling
+          reference or ambiguous name) or an advisory completeness gap. Gaps
+          are warning-severity findings in the completeness layer; they
+          block only under `--completeness error`.
 
   LintLayer:
     description: The three ordered stages of a lint run.
@@ -45,15 +49,25 @@ enums:
       - name: semantic
         definition: Relationship targets exist, invariant ids resolve, backtick terms are defined.
       - name: completeness
-        definition: Every entity has invariants; every entity is touched by a scenario.
+        definition: >-
+          Advisory gaps — every `Entity` has `Invariant`s, every `Entity` is
+          touched by a `Scenario`, and defined `GlossaryTerm`s and `Enum`s are
+          referenced. Findings carry `warning` severity and block only under
+          `--completeness error`.
 
   RendererBackend:
-    description: Which output format the `Renderer` targets.
+    description: >-
+      The artifacts the `Renderer` produces — the Markdown `Document` and the
+      Mermaid diagram embedded in it.
     values:
       - name: markdown
-        definition: A `Document` file (`*.modelith.md`) with an embedded Mermaid `erDiagram`.
+        definition: >-
+          A `Document` file (`*.modelith.md`) — the renderer's only top-level
+          output, and the committed form readers consume.
       - name: mermaid
-        definition: A standalone `erDiagram` block, used when the diagram is needed on its own.
+        definition: >-
+          The `erDiagram` block embedded in a Markdown `Document`, rendered by
+          `internal/render/mermaid`. Never emitted standalone.
 
   SkillName:
     description: The three skills shipped in the Claude Code plugin.
@@ -115,7 +129,7 @@ entities:
         description: Produce a `Document` from this `Model` via the `Renderer`.
       - name: import
         actor: Author
-        preserves: [import-pinned-to-ref, import-has-provenance]
+        preserves: [import-pinned-to-ref, import-has-provenance, fetch-timeout-bounded]
         description: Fetch and vendor a remote `Model` from a `Source`.
     invariants:
       - id: model-has-version
@@ -456,22 +470,28 @@ entities:
     attributes:
       - name: severity
         type: FindingSeverity
-        description: Whether this finding blocks (error), warns, or advises (gap).
+        description: >-
+          Whether this finding blocks — `error` always blocks; `warning`
+          (including completeness gaps) blocks only under
+          `--completeness error`.
       - name: layer
         type: LintLayer
         description: Which lint stage produced this finding.
       - name: path
         type: string
         description: JSON Pointer to the part of the `Model` this finding concerns.
+      - name: message
+        type: string
+        description: Human-readable description of what is wrong and how to fix it.
     invariants:
       - id: finding-has-severity
         statement: Every `LintFinding` has exactly one `severity`.
 
   Renderer:
     definition: >-
-      Produces a rendered `Document` from a `Model`. The renderer has two
-      backends: Markdown (embeds Mermaid diagrams) and Mermaid (standalone
-      `erDiagram`). CI uses `render --check` to fail on drift.
+      Produces a rendered `Document` from a `Model`. The output is a Markdown
+      file with an embedded Mermaid `erDiagram`, supplied by
+      `internal/render/mermaid`. CI uses `render --check` to fail on drift.
     relationships:
       - entity: Model
         cardinality: 1:n
@@ -483,7 +503,9 @@ entities:
     attributes:
       - name: backend
         type: RendererBackend
-        description: The output format — Markdown or standalone Mermaid.
+        description: >-
+          The artifact produced — the Markdown `Document`, with the Mermaid
+          `erDiagram` embedded in it.
     actions:
       - name: render
         actor: Author
@@ -533,8 +555,11 @@ entities:
   Import:
     definition: >-
       A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or
-      Azure DevOps URL pinned to a ref). Stored under `.modelith/deps/` with
-      provenance headers recording origin, ref, and digest.
+      Azure DevOps URL pinned to a ref). `deps import` writes it into the
+      directory you pass (the working directory by default), named by the
+      origin's filename, and stamps provenance headers recording origin, ref,
+      and digest. Re-running the fetch replaces an existing copy — that is the
+      refresh workflow.
     relationships:
       - entity: Source
         cardinality: n:1
@@ -548,24 +573,28 @@ entities:
       - name: vendoredPath
         type: string
         description: >-
-          Where the vendored file lives, e.g. `.modelith/deps/payments.modelith.yaml`.
+          Where the vendored file lives — the directory passed to `deps import`
+          (default: the working directory) plus the origin's filename, e.g.
+          `docs/payments.modelith.yaml`.
       - name: digest
         type: string
         description: Content hash recorded at fetch time for integrity verification.
-      - name: stale
-        type: boolean
-        derived: true
-        derivation: >-
-          True when the remote `Source` has moved past the pinned ref —
-          the vendored copy may be out of date.
     actions:
       - name: fetch
         actor: Author
-        preserves: [import-pinned-to-ref, import-has-provenance, source-host-unambiguous]
+        preserves: [import-pinned-to-ref, import-has-provenance, source-host-unambiguous, fetch-timeout-bounded]
         description: >-
-          Fetch the remote `Model` from the `Source`, write it to
-          `.modelith/deps/`, and stamp provenance headers.
+          Fetch the remote `Model` from the `Source` through the delegated CLI
+          (`gh` for GitHub, `az` for ADO), write it into the target directory
+          (default: the working directory), and stamp provenance headers. Each
+          delegated command is bounded by `--timeout` (default 60s); re-running
+          fetch replaces an existing copy.
     invariants:
+      - id: fetch-timeout-bounded
+        statement: >-
+          Every delegated fetch (`gh` for GitHub, `az` for ADO) is bounded by a
+          per-command `--timeout` (default 60s) — a hung CLI fails fast instead
+          of stalling the import.
       - id: import-pinned-to-ref
         statement: >-
           An `Import` is always pinned to a specific ref (branch, tag, or
@@ -592,9 +621,12 @@ entities:
       - name: host
         type: HostKind
         description: Which remote platform this source points to.
-      - name: url
+      - name: origin
         type: string
-        description: The full repository URL, including path and version query.
+        description: >-
+          The base repository URL — `https://github.com/<owner>/<repo>` or
+          `https://dev.azure.com/<org>/<project>/_git/<repo>`. The file path
+          and pinned ref are tracked by separate attributes.
       - name: ref
         type: string
         description: The pinned ref (branch, tag, or commit) the source is locked to.
@@ -679,10 +711,12 @@ entities:
 
   Example:
     definition: >-
-      The golden test fixture — `examples/example.modelith.yaml` and its
-      committed `.md`. It must lint clean under strict mode and its `.md` must
-      match the renderer's output exactly. Changes to the renderer or the
-      example require regenerating the `.md`.
+      The golden test fixtures — `examples/example.modelith.yaml` and the
+      worked examples under `docs/05-parking-garage/`, each with its committed
+      `.md`. All must lint clean under strict mode (`task lint-models`) and
+      their `.md` must match the renderer's output exactly (`task render-check`,
+      TestGoldenExample). Changes to the renderer or an example require
+      regenerating the `.md`.
     relationships:
       - entity: Model
         cardinality: n:1
@@ -786,8 +820,8 @@ scenarios:
     steps:
       - An `Author` adds an `Import` declaration to a `Model`, pointing at a
         `Source` with a GitHub URL pinned to a tag.
-      - The tool fetches the remote `Model` and vendors it under
-        `.modelith/deps/`.
+      - The tool fetches the remote `Model` via `gh api` and vendors it into
+        the target directory.
       - "Provenance headers are stamped into the vendored copy: the `Source`
         URL, the pinned ref, and a content digest."
       - A subsequent lint run resolves cross-model references (`scope.Name`)
@@ -796,6 +830,7 @@ scenarios:
       - import-pinned-to-ref
       - import-has-provenance
       - source-host-unambiguous
+      - fetch-timeout-bounded
       - attribute-type-resolves
 
   - name: Model imports shared vocabulary from Azure DevOps
@@ -814,6 +849,7 @@ scenarios:
       - import-has-provenance
       - source-host-unambiguous
       - source-ref-override-clears-ref-type
+      - fetch-timeout-bounded
       - attribute-type-resolves
 
   - name: Example is a golden fixture

@@ -13,13 +13,12 @@ Tooling for authoring domain models by conversation. An `Author` describes conce
 
 ### `FindingSeverity`
 
-The classification of a `LintFinding`.
+The classification of a `LintFinding` — how seriously it blocks a build.
 
 | Value | Definition |
 | --- | --- |
-| `error` | Must fix; the model is structurally or semantically invalid. |
-| `warning` | Likely a bug — e.g. a dangling reference or ambiguous name. |
-| `gap` | Advisory completeness gap — e.g. an entity with no invariants. |
+| `error` | Must fix; the model is structurally or semantically invalid, and the lint run exits non-zero. |
+| `warning` | Does not block on its own — either a likely bug (e.g. a dangling reference or ambiguous name) or an advisory completeness gap. Gaps are warning-severity findings in the completeness layer; they block only under `--completeness error`. |
 
 ### `HostKind`
 
@@ -38,16 +37,16 @@ The three ordered stages of a lint run.
 | --- | --- |
 | `structural` | JSON Schema conformance; errors here block later stages. |
 | `semantic` | Relationship targets exist, invariant ids resolve, backtick terms are defined. |
-| `completeness` | Every entity has invariants; every entity is touched by a scenario. |
+| `completeness` | Advisory gaps — every `Entity` has `Invariant`s, every `Entity` is touched by a `Scenario`, and defined `GlossaryTerm`s and `Enum`s are referenced. Findings carry `warning` severity and block only under `--completeness error`. |
 
 ### `RendererBackend`
 
-Which output format the `Renderer` targets.
+The artifacts the `Renderer` produces — the Markdown `Document` and the Mermaid diagram embedded in it.
 
 | Value | Definition |
 | --- | --- |
-| `markdown` | A `Document` file (`*.modelith.md`) with an embedded Mermaid `erDiagram`. |
-| `mermaid` | A standalone `erDiagram` block, used when the diagram is needed on its own. |
+| `markdown` | A `Document` file (`*.modelith.md`) — the renderer's only top-level output, and the committed form readers consume. |
+| `mermaid` | The `erDiagram` block embedded in a Markdown `Document`, rendered by `internal/render/mermaid`. Never emitted standalone. |
 
 ### `SkillName`
 
@@ -183,7 +182,7 @@ A value type defined at the `Model` level. Each `Enum` has a `description` and a
 
 ### `Example`
 
-The golden test fixture — `examples/example.modelith.yaml` and its committed `.md`. It must lint clean under strict mode and its `.md` must match the renderer's output exactly. Changes to the renderer or the example require regenerating the `.md`.
+The golden test fixtures — `examples/example.modelith.yaml` and the worked examples under `docs/05-parking-garage/`, each with its committed `.md`. All must lint clean under strict mode (`task lint-models`) and their `.md` must match the renderer's output exactly (`task render-check`, TestGoldenExample). Changes to the renderer or an example require regenerating the `.md`.
 
 **Relationships**
 
@@ -235,7 +234,7 @@ A non-entity vocabulary term — a role, an actor, or a domain noun — defined 
 
 ### `Import`
 
-A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or Azure DevOps URL pinned to a ref). Stored under `.modelith/deps/` with provenance headers recording origin, ref, and digest.
+A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or Azure DevOps URL pinned to a ref). `deps import` writes it into the directory you pass (the working directory by default), named by the origin's filename, and stamps provenance headers recording origin, ref, and digest. Re-running the fetch replaces an existing copy — that is the refresh workflow.
 
 **Relationships**
 
@@ -246,16 +245,16 @@ A vendored copy of a remote `Model`, fetched from a `Source` (GitHub or Azure De
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `vendoredPath` | string | Where the vendored file lives, e.g. `.modelith/deps/payments.modelith.yaml`. |
+| `vendoredPath` | string | Where the vendored file lives — the directory passed to `deps import` (default: the working directory) plus the origin's filename, e.g. `docs/payments.modelith.yaml`. |
 | `digest` | string | Content hash recorded at fetch time for integrity verification. |
-| `stale` | boolean | _Derived:_ True when the remote `Source` has moved past the pinned ref — the vendored copy may be out of date. |
 
 **Actions**
 
-- `fetch` — actor `Author`; preserves import-pinned-to-ref, import-has-provenance, source-host-unambiguous — Fetch the remote `Model` from the `Source`, write it to `.modelith/deps/`, and stamp provenance headers.
+- `fetch` — actor `Author`; preserves import-pinned-to-ref, import-has-provenance, source-host-unambiguous, fetch-timeout-bounded — Fetch the remote `Model` from the `Source` through the delegated CLI (`gh` for GitHub, `az` for ADO), write it into the target directory (default: the working directory), and stamp provenance headers. Each delegated command is bounded by `--timeout` (default 60s); re-running fetch replaces an existing copy.
 
 **Invariants**
 
+- **fetch-timeout-bounded** — Every delegated fetch (`gh` for GitHub, `az` for ADO) is bounded by a per-command `--timeout` (default 60s) — a hung CLI fails fast instead of stalling the import.
 - **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
 - **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
 
@@ -292,9 +291,10 @@ One issue discovered during a lint run. A finding is an error (must fix), a warn
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `severity` | FindingSeverity | Whether this finding blocks (error), warns, or advises (gap). |
+| `severity` | FindingSeverity | Whether this finding blocks — `error` always blocks; `warning` (including completeness gaps) blocks only under `--completeness error`. |
 | `layer` | LintLayer | Which lint stage produced this finding. |
 | `path` | string | JSON Pointer to the part of the `Model` this finding concerns. |
+| `message` | string | Human-readable description of what is wrong and how to fix it. |
 
 **Invariants**
 
@@ -351,7 +351,7 @@ A `*.modelith.yaml` file — the canonical, plain-language source of truth for a
 
 - `lint` — actor `Author`; preserves model-has-version, linter-three-layers — Run the `Linter` against this `Model` and surface every `LintFinding`.
 - `render` — actor `Author`; preserves renderer-output-matches-model, lint-before-render — Produce a `Document` from this `Model` via the `Renderer`.
-- `import` — actor `Author`; preserves import-pinned-to-ref, import-has-provenance — Fetch and vendor a remote `Model` from a `Source`.
+- `import` — actor `Author`; preserves import-pinned-to-ref, import-has-provenance, fetch-timeout-bounded — Fetch and vendor a remote `Model` from a `Source`.
 
 **Invariants**
 
@@ -383,7 +383,7 @@ A directed connection between two `Entity`s, declared from the parent. It carrie
 
 ### `Renderer`
 
-Produces a rendered `Document` from a `Model`. The renderer has two backends: Markdown (embeds Mermaid diagrams) and Mermaid (standalone `erDiagram`). CI uses `render --check` to fail on drift.
+Produces a rendered `Document` from a `Model`. The output is a Markdown file with an embedded Mermaid `erDiagram`, supplied by `internal/render/mermaid`. CI uses `render --check` to fail on drift.
 
 **Relationships**
 
@@ -394,7 +394,7 @@ Produces a rendered `Document` from a `Model`. The renderer has two backends: Ma
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `backend` | RendererBackend | The output format — Markdown or standalone Mermaid. |
+| `backend` | RendererBackend | The artifact produced — the Markdown `Document`, with the Mermaid `erDiagram` embedded in it. |
 
 **Actions**
 
@@ -479,7 +479,7 @@ A remote origin for an `Import`: a GitHub or Azure DevOps URL pinned to a ref (b
 | Name | Type | Description |
 | --- | --- | --- |
 | `host` | HostKind | Which remote platform this source points to. |
-| `url` | string | The full repository URL, including path and version query. |
+| `origin` | string | The base repository URL — `https://github.com/<owner>/<repo>` or `https://dev.azure.com/<org>/<project>/_git/<repo>`. The file path and pinned ref are tracked by separate attributes. |
 | `ref` | string | The pinned ref (branch, tag, or commit) the source is locked to. |
 | `project` | string | The Azure DevOps project name, extracted from the URL path (`/org/project/_git/repo`). Empty for GitHub sources. |
 | `refType` | string | The ADO version-type prefix parsed from the URL: `branch` (GB), `tag` (GT), or `commit` (GC). Empty for GitHub sources and when `--ref` overrides the URL's ref — the transport layer auto-detects. |
@@ -626,7 +626,7 @@ erDiagram
 **Steps**
 
 1. An `Author` adds an `Import` declaration to a `Model`, pointing at a `Source` with a GitHub URL pinned to a tag.
-2. The tool fetches the remote `Model` and vendors it under `.modelith/deps/`.
+2. The tool fetches the remote `Model` via `gh api` and vendors it into the target directory.
 3. Provenance headers are stamped into the vendored copy: the `Source` URL, the pinned ref, and a content digest.
 4. A subsequent lint run resolves cross-model references (`scope.Name`) against the vendored `Import`.
 
@@ -635,6 +635,7 @@ erDiagram
 - **import-pinned-to-ref** — An `Import` is always pinned to a specific ref (branch, tag, or commit) — it never tracks a moving target like `main`.
 - **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
 - **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
+- **fetch-timeout-bounded** — Every delegated fetch (`gh` for GitHub, `az` for ADO) is bounded by a per-command `--timeout` (default 60s) — a hung CLI fails fast instead of stalling the import.
 - **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
 
 ### Model imports shared vocabulary from Azure DevOps
@@ -654,6 +655,7 @@ erDiagram
 - **import-has-provenance** — Every vendored `Import` carries provenance headers recording the `Source` URL, the pinned ref, and a content digest for integrity verification.
 - **source-host-unambiguous** — Every `Source` has exactly one `host` — GitHub or ADO, never both and never neither. The host determines which CLI the transport layer uses.
 - **source-ref-override-clears-ref-type** — When a `Source`'s ref is set by `--ref` rather than parsed from the URL, RefType is empty — the transport layer auto-detects the ref type rather than trusting the URL prefix that was overridden.
+- **fetch-timeout-bounded** — Every delegated fetch (`gh` for GitHub, `az` for ADO) is bounded by a per-command `--timeout` (default 60s) — a hung CLI fails fast instead of stalling the import.
 - **attribute-type-resolves** — An `Attribute`'s type is a lowercase primitive, the PascalCase name of a defined `Enum`, or a well-formed `scope.Name` cross-model reference.
 
 ### Example is a golden fixture
