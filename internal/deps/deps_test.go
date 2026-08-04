@@ -1107,6 +1107,74 @@ func TestTimeoutRunner_ReturnsAClearErrorOnDeadline(t *testing.T) {
 	}
 }
 
+// TestTimeoutRunner_ReportsAKilledChildAsTheBound pins the issue #3 fix: when
+// the bound fires, ExecRunner SIGKILLs the process group and cmd.Output
+// returns *exec.ExitError ("signal: killed"), which errors.Is against
+// DeadlineExceeded / ErrWaitDelay does not match. The friendly message must
+// fire anyway — and must not echo the argv, the URI the command was fetching.
+func TestTimeoutRunner_ReportsAKilledChildAsTheBound(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+
+	r := timeoutRunner{inner: ExecRunner{}, timeout: 200 * time.Millisecond}
+	start := time.Now()
+	_, err := r.Run(context.Background(), "sleep", "30")
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	for _, want := range []string{"sleep", "did not finish within", "--timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %q: %v", want, err)
+		}
+	}
+	for _, leaked := range []string{"signal: killed", "sleep 30"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("the error leaks %q: %v", leaked, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Run blocked %v after the bound — the deadline did not fire", elapsed)
+	}
+}
+
+// TestTimeoutRunner_ParentCancelIsNotReportedAsTimeout pins the review finding
+// on 3f88c53: a caller canceling the context (e.g. a future Ctrl+C handler)
+// must not be relabeled as a timeout. The bound is deliberately far away, so
+// only the parent cancel can stop the child — the error path is otherwise
+// identical to a timeout (process-group SIGKILL, *exec.ExitError), and the
+// context is what tells the two apart: context.Canceled is not a deadline the
+// user can raise with --timeout.
+func TestTimeoutRunner_ParentCancelIsNotReportedAsTimeout(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	r := timeoutRunner{inner: ExecRunner{}, timeout: time.Minute}
+	start := time.Now()
+	_, err := r.Run(ctx, "sleep", "30")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	for _, misleading := range []string{"did not finish within", "--timeout"} {
+		if strings.Contains(err.Error(), misleading) {
+			t.Errorf("a caller cancel is misreported as a timeout (%q): %v", misleading, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Run blocked %v after the cancel — the child was not killed", elapsed)
+	}
+}
+
 // TestImport_TimeoutIsPerCommand pins that the bound applies to each command
 // individually, not to the whole import: a whole-import budget could let the
 // first call consume everything and fail on the second. A per-command deadline

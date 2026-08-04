@@ -114,7 +114,17 @@ func (r timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]
 	// ErrWaitDelay is the deadline's last line of defense: the direct child was
 	// killed, but a helper it spawned held the pipe past WaitDelay, so Wait
 	// abandoned it. It is the deadline surfacing, so report it as one.
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
+	//
+	// The deadline's main line is ctx.Err(), asked for a *deadline* specifically:
+	// when the bound fires, ExecRunner SIGKILLs the process group and cmd.Output
+	// returns *exec.ExitError ("signal: killed") — os/exec prefers the process's
+	// own error over the context's, so errors.Is cannot see the deadline through
+	// it (issue #3). The context still distinguishes a fired deadline from a
+	// caller canceling the fetch (e.g. Ctrl+C); only the former is a timeout the
+	// user can raise with --timeout. And err must be non-nil: a command that
+	// completed successfully just before the bound must not have its output
+	// discarded because the deadline ticked over in the same instant.
+	if err != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay)) {
 		return nil, fmt.Errorf("%s did not finish within %s — the fetch was abandoned (raise it with --timeout if this is a slow but legitimate fetch)", name, r.timeout)
 	}
 	return out, err
