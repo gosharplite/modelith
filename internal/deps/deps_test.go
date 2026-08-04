@@ -1107,6 +1107,38 @@ func TestTimeoutRunner_ReturnsAClearErrorOnDeadline(t *testing.T) {
 	}
 }
 
+// TestTimeoutRunner_ReportsAKilledChildAsTheBound pins the issue #3 fix: when
+// the bound fires, ExecRunner SIGKILLs the process group and cmd.Output
+// returns *exec.ExitError ("signal: killed"), which errors.Is against
+// DeadlineExceeded / ErrWaitDelay does not match. The friendly message must
+// fire anyway — and must not echo the argv, the URI the command was fetching.
+func TestTimeoutRunner_ReportsAKilledChildAsTheBound(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+
+	r := timeoutRunner{inner: ExecRunner{}, timeout: 200 * time.Millisecond}
+	start := time.Now()
+	_, err := r.Run(context.Background(), "sleep", "30")
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	for _, want := range []string{"sleep", "did not finish within", "--timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %q: %v", want, err)
+		}
+	}
+	for _, leaked := range []string{"signal: killed", "sleep 30"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("the error leaks %q: %v", leaked, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Run blocked %v after the bound — the deadline did not fire", elapsed)
+	}
+}
+
 // TestImport_TimeoutIsPerCommand pins that the bound applies to each command
 // individually, not to the whole import: a whole-import budget could let the
 // first call consume everything and fail on the second. A per-command deadline
