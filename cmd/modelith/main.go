@@ -109,25 +109,35 @@ that use the network; lint and render never do.`),
 }
 
 func depsImportCmd() *cobra.Command {
-	var ref string
+	var (
+		ref     string
+		timeout time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "import <url> [dir]",
 		Short: "Vendor a model from another repository",
 		Long: strings.TrimSpace(`
 Vendor a model from another repository into this one.
 
-<url> is the address of the file as it appears in a browser on github.com. The
-copy is written into [dir] (the working directory by default) with a provenance
-header recording where it came from, and is verified against that header by
-every later lint.
+<url> is the address of the file as it appears in a browser. Both github.com
+and dev.azure.com are supported. The copy is written into [dir] (the working
+directory by default) with a provenance header recording where it came from,
+and is verified against that header by every later lint.
 
-Fetching is delegated to the gh CLI, which must be installed and authenticated.
+For GitHub, fetching is delegated to the gh CLI, which must be installed and
+authenticated. For Azure DevOps, fetching is delegated to the az CLI; run
+'az login' first.
+
+Each fetch is bounded by --timeout (default 60s, 0 disables the bound): a hung
+CLI fails fast instead of stalling the import.
+
 The imports list of the model that will reference this copy is yours to edit;
 this command prints the entry to add.`),
 		Example: strings.TrimSpace(`
   modelith deps import https://github.com/acme/billing/blob/main/docs/payments.modelith.yaml
   modelith deps import https://github.com/acme/billing/blob/main/docs/payments.modelith.yaml docs/
-  modelith deps import --ref v2.1.0 https://github.com/acme/billing/blob/main/docs/payments.modelith.yaml`),
+  modelith deps import --ref v2.1.0 https://github.com/acme/billing/blob/main/docs/payments.modelith.yaml
+  modelith deps import "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain"`),
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "."
@@ -143,10 +153,11 @@ this command prints the entry to add.`),
 			}
 
 			res, err := deps.Import(cmd.Context(), deps.Options{
-				URL: args[0],
-				Dir: dir,
-				Ref: ref,
-				Now: time.Now(),
+				URL:     args[0],
+				Dir:     dir,
+				Ref:     ref,
+				Now:     time.Now(),
+				Timeout: timeout,
 			})
 			if err != nil {
 				return err
@@ -161,6 +172,8 @@ this command prints the entry to add.`),
 		},
 	}
 	cmd.Flags().StringVar(&ref, "ref", "", "ref to fetch, overriding the one in the URL (a tag pins the copy)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second,
+		"abandon a delegated fetch (gh/az) that exceeds this duration; 0 disables the bound")
 	return cmd
 }
 

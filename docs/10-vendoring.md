@@ -186,11 +186,15 @@ already solves.
 
 ## Requirements and limits
 
-- **`gh` must be installed and authenticated.** modelith implements no network
-  transport of its own; it delegates to the [GitHub
-  CLI](https://cli.github.com), which already solves authentication for private
-  and internal repositories.
-- **GitHub only, for now.** A URL on another host is an error that asks you to
+- **`gh` or `az` must be installed and authenticated.** modelith implements no
+  network transport of its own; it delegates to the [GitHub
+  CLI](https://cli.github.com) or the [Azure
+  CLI](https://learn.microsoft.com/en-us/cli/azure/), which already solve
+  authentication for private and internal repositories.
+- **Both github.com and dev.azure.com are supported.** The URL is the address of
+  the file as it appears in a browser. For Azure DevOps that means a `_git` URL
+  with `?path=...&version=GB<branch>` — open the file on dev.azure.com and copy
+  the address bar, exactly as for GitHub. If you need another host, please
   [open an issue](https://github.com/stacklok/modelith/issues). That is not a
   brush-off: the header records *how* it was fetched, so adding another
   transport is straightforward — what is missing is a real user to build it
