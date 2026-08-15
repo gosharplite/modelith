@@ -3,15 +3,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -71,10 +74,18 @@ func buildVersion() string {
 var errBlocking = errors.New("blocking findings")
 
 func main() {
-	if err := rootCmd().Execute(); err != nil {
-		if !errors.Is(err, errBlocking) {
-			fmt.Fprintln(os.Stderr, "error:", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := rootCmd().ExecuteContext(ctx); err != nil {
+		if errors.Is(err, errBlocking) {
+			os.Exit(1)
 		}
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "interrupted")
+			os.Exit(130)
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
@@ -86,6 +97,9 @@ func rootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       buildVersion(),
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Context().Err()
+		},
 	}
 	root.AddCommand(lintCmd(), renderCmd(), schemaCmd(), depsCmd())
 	return root

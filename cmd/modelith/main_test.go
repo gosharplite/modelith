@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -23,7 +24,7 @@ func run(t *testing.T, args ...string) (string, error) {
 	root.SetOut(&buf)
 	root.SetErr(&buf)
 	root.SetArgs(args)
-	err := root.Execute()
+	err := root.ExecuteContext(context.Background())
 	return buf.String(), err
 }
 
@@ -589,7 +590,7 @@ func TestDepsImportTimeoutFlagParses(t *testing.T) {
 			cmd.SetErr(&buf)
 			cmd.SetArgs([]string{"--timeout", tc.val,
 				"https://gitlab.com/acme/billing/-/blob/main/m.modelith.yaml", dir})
-			err := cmd.Execute()
+			err := cmd.ExecuteContext(context.Background())
 			if err == nil {
 				t.Fatal("expected the unsupported-host error, got nil")
 			}
@@ -603,5 +604,21 @@ func TestDepsImportTimeoutFlagParses(t *testing.T) {
 				t.Errorf("--timeout parsed as %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestExecuteContextInterrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	root := rootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"schema"})
+
+	err := root.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected error when executing with canceled context, got nil")
 	}
 }
