@@ -738,6 +738,20 @@ func TestParseSource_ADO(t *testing.T) {
 			},
 		},
 		{
+			name: "leading slash in path query parameter is stripped",
+			raw:  "https://dev.azure.com/myorg/myproject/_git/myrepo?path=/docs/payments.modelith.yaml&version=GBmain",
+			want: Source{
+				Host:    HostADO,
+				Origin:  "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Owner:   "myorg",
+				Project: "myproject",
+				Repo:    "myrepo",
+				Ref:     "main",
+				RefType: "branch",
+				Path:    "docs/payments.modelith.yaml",
+			},
+		},
+		{
 			name:    "no path query parameter",
 			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?version=GBmain",
 			wantErr: "names no file inside the repository",
@@ -748,9 +762,44 @@ func TestParseSource_ADO(t *testing.T) {
 			wantErr: "not an Azure DevOps file URL",
 		},
 		{
-			name:    "a traversal segment is rejected",
+			name:    "a traversal segment in URL path is rejected",
 			raw:     "https://dev.azure.com/myorg/../_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain",
 			wantErr: `has a ".." path segment`,
+		},
+		{
+			name:    "double slash in path query parameter is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs//payments.modelith.yaml&version=GBmain",
+			wantErr: `has a "" path segment`,
+		},
+		{
+			name:    "trailing slash in path query parameter is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/payments.modelith.yaml/&version=GBmain",
+			wantErr: `has a "" path segment`,
+		},
+		{
+			name:    "relative dot traversal in path query parameter is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/./payments.modelith.yaml&version=GBmain",
+			wantErr: `has a "." path segment`,
+		},
+		{
+			name:    "parent dot traversal in path query parameter is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/../../secret.yaml&version=GBmain",
+			wantErr: `has a ".." path segment`,
+		},
+		{
+			name:    "backslash in path segment is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs\\payments.modelith.yaml&version=GBmain",
+			wantErr: `has a "docs\\payments.modelith.yaml" path segment`,
+		},
+		{
+			name:    "untrimmed whitespace in path segment is rejected",
+			raw:     "https://dev.azure.com/myorg/myproject/_git/myrepo?path=docs/ payments.modelith.yaml&version=GBmain",
+			wantErr: `has a " payments.modelith.yaml" path segment`,
+		},
+		{
+			name:    "legacy visualstudio.com URL offers migration hint to dev.azure.com",
+			raw:     "https://myorg.visualstudio.com/myproject/_git/myrepo?path=docs/payments.modelith.yaml&version=GBmain",
+			wantErr: `is a legacy visualstudio.com URL — Azure DevOps moved to dev.azure.com`,
 		},
 		{
 			name:    "no version parameter and no --ref",

@@ -127,11 +127,16 @@ func ParseSource(raw, ref string) (Source, error) {
 	}
 	host := strings.TrimPrefix(strings.ToLower(u.Host), "www.")
 
-	switch host {
-	case "github.com":
+	switch {
+	case host == "github.com":
 		return parseGitHubSource(u, ref)
-	case "dev.azure.com":
+	case host == "dev.azure.com":
 		return parseADOSource(u, ref)
+	case strings.HasSuffix(host, ".visualstudio.com"):
+		org := strings.TrimSuffix(host, ".visualstudio.com")
+		return Source{}, fmt.Errorf(
+			"%q is a legacy visualstudio.com URL — Azure DevOps moved to dev.azure.com. Open the file in your browser on dev.azure.com (e.g. https://dev.azure.com/%s) and import that address instead",
+			raw, org)
 	default:
 		return Source{}, fmt.Errorf(
 			"modelith can currently fetch only from github.com and dev.azure.com, and %q is on %q. Support for other hosts is not written yet because nobody has needed it — if you do, please open an issue at %s saying where your models live",
@@ -200,9 +205,16 @@ func parseADOSource(u *url.URL, ref string) (Source, error) {
 	}
 
 	q := u.Query()
-	filePath := q.Get("path")
+	filePath := strings.TrimPrefix(strings.TrimSpace(q.Get("path")), "/")
 	if filePath == "" {
 		return Source{}, fmt.Errorf("%q names no file inside the repository — it needs a ?path= query parameter", u.String())
+	}
+	for _, p := range strings.Split(filePath, "/") {
+		if p == "" || p == "." || p == ".." || strings.Contains(p, "\\") || strings.TrimSpace(p) != p {
+			return Source{}, fmt.Errorf(
+				"%q has a %q path segment, which is not part of a file's address on dev.azure.com — copy the address bar from the file's page rather than assembling the URL by hand",
+				u.String(), p)
+		}
 	}
 
 	version := q.Get("version")
