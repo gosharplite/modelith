@@ -569,7 +569,7 @@ func fetchCommitADO(ctx context.Context, runner Runner, src Source) (string, err
 		return "", err
 	}
 	sha := strings.TrimSpace(string(out))
-	if sha == "" {
+	if sha == "" || sha == "null" {
 		return "", fmt.Errorf("%s/%s/_git/%s has no commit touching %q at %q",
 			src.Owner, src.Project, src.Repo, src.Path, src.Ref)
 	}

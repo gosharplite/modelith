@@ -1042,6 +1042,18 @@ func TestImport_ADO_Rejections(t *testing.T) {
 			wantErr: "it declares no kind",
 		},
 		{
+			name:    "a path with no commits at that ref (empty commit sha)",
+			runner:  adoRunner(adoContent, ""),
+			url:     adoBlobURL,
+			wantErr: "no commit touching",
+		},
+		{
+			name:    "a path with no commits at that ref (null commit sha)",
+			runner:  adoRunner(adoContent, "null"),
+			url:     adoBlobURL,
+			wantErr: "no commit touching",
+		},
+		{
 			name:    "az refusing the fetch",
 			runner:  &fakeRunner{content: adoContent, sha: adoCommit, ado: true, fail: "/items"},
 			url:     adoBlobURL,
