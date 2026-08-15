@@ -520,7 +520,7 @@ func adoVersionType(src Source) string {
 // rather than taken from stdout: az rest appends a newline when it prints a
 // raw body to stdout, so the stdout form is not byte-identical to the origin
 // file — it drifts a trailing newline into the vendored copy and its digest
-// (ADR-0015). The --output-file form is the exact API response body.
+// (ADR-0016). The --output-file form is the exact API response body.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",
