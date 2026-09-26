@@ -68,6 +68,16 @@ actionable error directing the user to copy the URL from `dev.azure.com`.
 This decision formally supersedes the "`gh` is the only transport" clause in
 ADR-0015. `dev.azure.com` is a first-class supported origin for `deps import`.
 
+**8. Scope: import now, refresh later.**
+The second transport lands on the import path only. `deps check` and `deps
+update` remain GitHub-only: they reach the origin through `gh` and rebuild a
+GitHub-shaped address from the provenance header, which an Azure DevOps origin
+cannot satisfy. A refresh of an ADO copy refuses up front with an error that
+names the host and the remedy, and the gap is tracked as follow-up work. This is
+recorded as a decision rather than left implicit so the refusal reads as a
+scoped limitation, not a bug, and so nobody reads "first-class origin" as
+covering a lifecycle the transport does not yet reach.
+
 ## Consequences
 
 - `modelith deps import` accepts both `github.com` and `dev.azure.com` URLs.
@@ -77,3 +87,7 @@ ADR-0015. `dev.azure.com` is a first-class supported origin for `deps import`.
   content digests identically to GitHub vendored files.
 - Azure DevOps fetching requires the `az` CLI installed and authenticated via
   `az login`.
+- A copy vendored from Azure DevOps can be imported and linted, but not
+  refreshed: `deps check` and `deps update` fetch through `gh` and refuse such a
+  copy with an actionable error. Refresh for non-GitHub origins is follow-up
+  work.

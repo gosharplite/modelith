@@ -195,6 +195,18 @@ that matched none of your copies does not read as good news. To find them:
 git grep -l '# modelith-vendored'
 ```
 
+:::note[Refresh reaches github.com only, for now]
+
+`deps check` and `deps update` fetch through `gh`, which speaks only GitHub, so a
+copy vendored from Azure DevOps cannot be refreshed by this version. Both
+commands report it against the copy's own line — naming the host and the
+remedy — rather than trying and failing obscurely, and the gap is tracked at
+[issue #6](https://github.com/gosharplite/modelith/issues/6). To take a newer
+version of an ADO copy in the meantime, import it again; that overwrites the
+copy with the origin's current file.
+
+:::
+
 ### Two ways to track a model
 
 Which one you are on is whatever `# modelith-ref:` records.
@@ -284,6 +296,11 @@ already solves.
   brush-off: the header records *how* it was fetched, so adding another
   transport is straightforward — what is missing is a real user to build it
   for, and an issue is how you become one.
+- **`deps check` and `deps update` are github.com only, for now.** They reach the
+  origin through `gh`, so an Azure DevOps copy can be imported and linted but
+  not refreshed; re-import it to take a newer version. Both commands say so in
+  the copy's own line rather than failing obscurely, and the gap is tracked at
+  [issue #6](https://github.com/gosharplite/modelith/issues/6).
 - **`lint` and `render` never touch the network**, whatever you pass them
   ([ADR-0011](https://github.com/stacklok/modelith/blob/main/project-docs/adr/0011-network-boundary.md)).
   Everything under `modelith deps` is opt-in, and nothing else fetches.
