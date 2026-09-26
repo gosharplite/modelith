@@ -26,6 +26,9 @@ type fakeRunner struct {
 	fail string
 	// ado sets whether to answer as az rest (ADO) instead of gh api.
 	ado bool
+	// unusable, when set, makes calls to matching endpoints fail because gh itself
+	// cannot be used.
+	unusable string
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -43,6 +46,9 @@ func (f *fakeRunner) runGh(args []string) ([]byte, error) {
 		if strings.HasPrefix(a, "repos/") {
 			endpoint = a
 		}
+	}
+	if f.unusable != "" && strings.Contains(endpoint, f.unusable) {
+		return nil, unusable{fmt.Errorf("gh is not installed — modelith delegates fetching to it")}
 	}
 	if f.fail != "" && strings.Contains(endpoint, f.fail) {
 		return nil, fmt.Errorf("gh: HTTP 404: Not Found (%s)", endpoint)
@@ -205,6 +211,14 @@ func TestParseSource(t *testing.T) {
 			name:    "another host asks for an issue rather than guessing",
 			raw:     "https://gitlab.com/acme/billing/-/blob/main/payments.modelith.yaml",
 			wantErr: "github.com/stacklok/modelith/issues",
+		},
+		{
+			// The Raw button hands this one back, so it is easy to paste. Sending
+			// the reader off to ask for another host to be supported is advice
+			// about the wrong problem: the model is already where modelith looks.
+			name:    "a raw URL is pointed at the blob view, not at an issue",
+			raw:     "https://raw.githubusercontent.com/acme/billing/main/docs/payments.modelith.yaml",
+			wantErr: "the same address with /blob/ in it",
 		},
 		{
 			name:    "a repository URL names no file",
@@ -501,6 +515,39 @@ func TestImport_RefusesToOverwriteWhatItDidNotWrite(t *testing.T) {
 	}
 }
 
+func TestImport_RefusesUnknownReservedPrefixAtTarget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "payments.modelith.yaml")
+	existing := "# modelith-note: locally owned\n" + strings.Replace(upstream, "title: Payments", "title: Ours", 1)
+	if err := os.WriteFile(target, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := importInto(t, dir, &fakeRunner{content: upstream, sha: sha}, blobURL)
+	if err == nil {
+		t.Fatal("an unknown reserved-prefix comment allowed import to overwrite a local model")
+	}
+	for _, want := range []string{
+		"cannot be identified as a copy of the source",
+		"Import into a different directory",
+		"deliberately move or delete",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not offer %q: %v", want, err)
+		}
+	}
+
+	got, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != existing {
+		t.Errorf("the refused import wrote over the file anyway:\n%s", got)
+	}
+}
+
 // TestSplitHint pins that the ref/path hint is offered for the failure it
 // explains and no other. It was appended to every fetch error, so "gh is not
 // installed" arrived with a paragraph about ref splitting attached — advice
@@ -549,6 +596,39 @@ func TestImport_RefreshIsNotRefusedOverCasing(t *testing.T) {
 	res, err := importInto(t, dir, &fakeRunner{content: upstream + "  # newer\n", sha: "9" + sha[1:]}, blobURL)
 	if err != nil {
 		t.Fatalf("a refresh differing only in the origin's casing was refused: %v", err)
+	}
+	if !res.Replaced {
+		t.Error("did not report replacing the earlier copy")
+	}
+}
+
+// TestImport_RefreshIsNotRefusedOverATrailingSlash pins the other way an origin
+// can differ without naming a different repository. A trailing slash is what a
+// browser's address bar most readily adds, so a hand-written header carries one;
+// refresh already trimmed it when rebuilding the fetch address, and guardTarget
+// did not, so the same header updated cleanly under one command and was refused
+// as a different model's by another.
+func TestImport_RefreshIsNotRefusedOverATrailingSlash(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	res, err := importInto(t, dir, &fakeRunner{content: upstream, sha: sha}, blobURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slashed := strings.Replace(readFile(t, res.Path),
+		provenance.LinePrefix+"origin: https://github.com/acme/billing\n",
+		provenance.LinePrefix+"origin: https://github.com/acme/billing/\n", 1)
+	if !strings.Contains(slashed, "billing/\n") {
+		t.Fatal("the test did not add a trailing slash to the origin")
+	}
+	if err := os.WriteFile(res.Path, []byte(slashed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err = importInto(t, dir, &fakeRunner{content: upstream + "  # newer\n", sha: "9" + sha[1:]}, blobURL)
+	if err != nil {
+		t.Fatalf("a refresh differing only in a trailing slash was refused: %v", err)
 	}
 	if !res.Replaced {
 		t.Error("did not report replacing the earlier copy")

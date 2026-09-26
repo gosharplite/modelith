@@ -95,7 +95,7 @@ Each key under `entities` is the entity's canonical name (PascalCase, e.g.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `definition` | string | yes | Two to four sentences: what it is, what it is not. |
-| `subtypeOf` | string | no | Names the entity this one is a kind of (an is-a link). Must reference a defined entity. |
+| `subtypeOf` | string | no | Names the entity this one is a kind of (an is-a link). May name a defined local entity or an entity in a direct import as `scope.Entity`. |
 | `relationships` | list | no | See [Relationship](#relationship). |
 | `attributes` | list | no | See [Attribute](#attribute). |
 | `actions` | list | no | Mutations the system exposes. See [Action](#action). |
@@ -115,20 +115,23 @@ versions in play, so the ER stays a deliberately lossy view; the Markdown text
 is the source of truth.
 
 Use `subtypeOf` for generalization — when one entity *is a kind of* another
-(a `Card` is a `PaymentMethod`). The child declares it, and it must name a
-defined entity; the linter errors on an undefined parent or a cycle. A parent's
-invariants are understood to cover its subtypes, so a subtype that adds no rule
-of its own is not flagged for having no invariants. The Mermaid ER diagram does
-not draw the is-a link — erDiagram has no generalization notation, so the
-hierarchy lives in the rendered Markdown (each child names its supertype and
-each parent lists its subtypes), a deliberately lossy ER per the same principle
-as derived entities.
+(a `Card` is a `PaymentMethod`). The child declares it. The parent may be a
+local entity or a direct import qualified as `scope.Entity`; the latter must
+resolve to an entity in that import. The linter errors on an undefined local
+parent, missing imported parent, or a cycle among local entities. A local
+parent's invariants are understood to cover its subtypes, so a subtype that adds
+no rule of its own is not flagged for having no invariants. An imported parent
+is a boundary: modelith does not walk its ancestry or inherit its invariants.
+The Mermaid ER diagram does not draw the is-a link — erDiagram has no
+generalization notation, so the hierarchy lives in the rendered Markdown (each
+child names its supertype and each local parent lists its subtypes), a
+deliberately lossy ER per the same principle as derived entities.
 
 ## Relationship
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `entity` | string | yes | Target entity name. Must reference a defined entity. |
+| `entity` | string | yes | Target entity name. Must reference a defined local entity or an entity in a direct import as `scope.Entity`. |
 | `cardinality` | string | yes | Written `left:right` (see below). `1:1`, `1:n`, `n:1`, `n:n` are the common shorthands. |
 | `symmetric` | boolean | no | The relationship carries no inherent order: `(a, b)` is the same as `(b, a)`. Only valid on a self-referential relationship or one whose target side is more than one. |
 | `role` | string | no | The **short** role the related entity plays (`Owner`, `Predecessor`) — ideally a glossary term. Backtick entity and glossary names. It is the only label the diagram draws, so prose belongs in `note`; the linter warns on a role that reads as a sentence. |
@@ -149,6 +152,12 @@ cardinalities must be inverses (`1:n` one way ⇒ `n:1` the other; `1:1` and `n:
 invert to themselves). The linter errors on a contradiction, and the renderer collapses
 a matching pair into a single edge. Declaring it once is fine; the renderer
 shows the edge either way.
+
+A relationship may target an entity from a direct import as `scope.Entity`. The
+linter validates that imported entity exists, and the renderer shows it as a
+qualified external node. Validation stops at the import boundary: reciprocity,
+pairing, and mutual-ownership checks apply only to relationships declared in
+this model, even when the local declaration uses `ownership: owned`.
 
 When there's an intuitive **parent** — the entity that owns or contains the
 other, or sits on the "one" side of a one-to-many — prefer declaring the
@@ -250,6 +259,7 @@ entity-level ones render with their entity.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | yes | Short title. |
+| `description` | string | no | Short prose summary of what the scenario tests or demonstrates. |
 | `actors` | list of string | no | Entity names or glossary roles involved. Ad-hoc participants (e.g. `TargetUser`) are allowed and not required to be glossary terms. |
 | `steps` | list of string | yes | Ordered steps. Backtick entity names. |
 | `invariants_touched` | list of string | no | **Ids** of invariants this scenario exercises. Each must reference a declared invariant. |
@@ -327,11 +337,10 @@ Six rules are worth knowing before you use this:
   `shipping`, `shipping.Carrier` is not available in `garage` — import it
   there too. Mutual imports (`a` lists `b`, `b` lists `a`) are therefore legal
   and terminate.
-- **Only an attribute `type` may be qualified.** Cross-model references in
-  `relationship.entity` and `subtypeOf` are not supported; the linter says so
-  plainly rather than letting the name-pattern rejection speak for it. Whether
-  the ER diagram should draw a foreign entity — and how reciprocity would work
-  across a boundary — has no answer yet, and no live model needs one.
+- **Qualified references name imported items.** An attribute `type` can name an
+  imported enum as `scope.Enum`. `relationship.entity` and `subtypeOf` can name
+  an imported entity as `scope.Entity`. Each resolves only through a direct
+  import; an imported model's own imports are not in scope.
 - **Nothing is fetched.** `imports` names files that are already in your
   repository; `lint` and `render` never touch the network
   ([ADR-0011](https://github.com/stacklok/modelith/blob/main/project-docs/adr/0011-network-boundary.md)).
@@ -347,19 +356,19 @@ Six rules are worth knowing before you use this:
   is out of reach.
 
 Rendered Markdown names each import, shows the path as written, and links
-separately to that model's rendered `.md`; a qualified type links straight to
-the item's heading there. The renderer never opens an imported file, so a link
-points at where the Markdown *would* be: render the imported model too, or the
-link dangles. That location is the imported model's **default** rendered path
-— beside its own `.yaml`, per [`modelith render`](./07-cli.md) with no `-o` —
-expressed relative to wherever this Markdown is written, so `-o` a different
-directory than the source keeps the link resolving. `--stdout` has no output
-location to relativize against, so its links stay relative to the source, as
-they would from a default, beside-the-source render.
+qualified references straight to the item's heading there. The renderer never
+opens an imported file, so a link points at where the Markdown *would* be:
+render the imported model too, or the link dangles. That location is the imported
+model's **default** rendered path — beside its own `.yaml`, per [`modelith
+render`](./07-cli.md) with no `-o` — expressed relative to wherever this
+Markdown is written, so `-o` a different directory than the source keeps the
+link resolving. `--stdout` has no output location to relativize against, so its
+links stay relative to the source, as they would from a default,
+beside-the-source render.
 
-The linter reports a qualified type that doesn't resolve as an **error**, while
-an *unqualified* PascalCase type that names no enum is only a **warning**. The
-asymmetry is deliberate: `PaymentMethod` might be a primitive the author
+The linter reports an unresolved qualified reference as an **error**, while an
+*unqualified* PascalCase attribute type that names no enum is only a **warning**.
+The asymmetry is deliberate: `PaymentMethod` might be a primitive the author
 invented, so the linter can only suggest; `payments.PaymentMethod` can be
 nothing but a cross-model reference, so failing to resolve it is a broken
 reference.
@@ -457,8 +466,10 @@ The JSON Schema covers structure. [`modelith lint`](./07-cli.md) adds:
       filename yields no valid slug, resolves outside the repository holding
       this model, contains a control character, or declares a schema version
       this modelith doesn't support;
-    - a qualified attribute `type` whose scope isn't imported, or that names
-      no enum in the model it resolves to.
+    - a qualified attribute `type` whose scope is not imported or that names no
+      enum in the model it resolves to; or a qualified relationship target or
+      subtype parent whose scope is not imported or that names no entity in the
+      model it resolves to.
   - **Warnings** (likely-but-not-certainly wrong):
     - a backticked term in freeform text that resolves to no entity, glossary
       term, role, or actor;

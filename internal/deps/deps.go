@@ -48,10 +48,14 @@ func runCommand(cmd *exec.Cmd, name string, args []string, stderr *strings.Build
 	out, err := cmd.Output()
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("%s is not installed — modelith delegates fetching to it%s", name, installHint(name))
+			return nil, unusable{fmt.Errorf("%s is not installed — modelith delegates fetching to it%s", name, installHint(name))}
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
+			failed := fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
+			if unauthenticated(msg) {
+				return nil, unusable{failed}
+			}
+			return nil, failed
 		}
 		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
@@ -104,6 +108,32 @@ func (r timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]
 	return out, err
 }
 
+// unauthenticated reports whether gh refused for want of credentials rather
+// than because of anything about the request.
+//
+// It matches gh's own text because gh is a separate program: it reports this on
+// stderr and exits 1, with no typed error to unwrap and no distinguishing exit
+// code. The three needles are the ones gh's binary actually carries — "gh auth
+// login" appears in every logged-out message, "GH_TOKEN" in the two automation
+// ones, and HTTP 401 is a token that exists and is refused. Reading it wrong
+// costs a batch that stops when it could have continued, or one that repeats
+// the same paragraph per file.
+func unauthenticated(msg string) bool {
+	for _, needle := range []string{"gh auth login", "GH_TOKEN", "HTTP 401"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// unusable marks a failure of the tool itself rather than of the request, so
+// errors.Is(err, ErrToolUnavailable) reports true without the sentinel's text
+// appearing in the message the user reads.
+type unusable struct{ error }
+
+func (unusable) Is(target error) bool { return target == ErrToolUnavailable }
+
 // Source is a model file in another repository, as an origin URL parsed into
 // the parts a fetch and a later refresh both need.
 type Source struct {
@@ -125,7 +155,18 @@ func ParseSource(raw, ref string) (Source, error) {
 	if err != nil {
 		return Source{}, fmt.Errorf("%q is not a URL: %w", raw, err)
 	}
+	// A host is case-insensitive, and a browser hands back the "www." form as
+	// readily as the bare one; neither is a different site.
 	host := strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+	// The Raw button hands back this host, so it is an easy thing to paste. The
+	// model is on GitHub and the address just names a different view of it, so
+	// sending the reader off to ask for another host to be supported would be
+	// advice about the wrong problem.
+	if host == "raw.githubusercontent.com" {
+		return Source{}, fmt.Errorf(
+			"%q is a raw file URL, and modelith wants the page you see when you open the file on github.com — the same address with /blob/ in it. Open the file there and copy the address bar",
+			raw)
+	}
 
 	switch {
 	case host == "github.com":
@@ -399,18 +440,20 @@ func guardTarget(target string, src Source) (replaced bool, err error) {
 			"%s already exists and carries no provenance header, so it is a model this repository owns rather than a copy of one — importing would overwrite it. Import into a different directory, or move that file aside first",
 			target)
 	}
-	// A header too malformed to name where it came from is still a vendored
-	// copy, and replacing it is how it gets repaired; only a header that names
-	// a *different* model blocks the write.
+	// A malformed header can still be repaired, but only if its surviving
+	// identity names this exact source. A reserved-prefix comment alone is not
+	// enough to establish that this repository does not own the file.
 	h, _ := provenance.Parse(existing)
 	if h.Origin == "" || h.Path == "" {
-		return true, nil
+		return false, fmt.Errorf(
+			"%s cannot be identified as a copy of the source (%s/%s) because its provenance header does not name both an origin and path. Import into a different directory, or deliberately move or delete the existing file first",
+			target, src.Origin, src.Path)
 	}
 	switch {
 	// GitHub treats an owner and a repository name case-insensitively, and
 	// Origin keeps whatever casing the URL was typed with, so comparing these
 	// byte-for-byte would refuse a refresh over nothing but capitalisation.
-	case !strings.EqualFold(h.Origin, src.Origin):
+	case !strings.EqualFold(normOrigin(h.Origin), normOrigin(src.Origin)):
 		return false, fmt.Errorf(
 			"%s is a vendored copy of %s/%s, not of %s/%s — two different models share that filename. Import into a different directory so both can live here",
 			target, h.Origin, h.Path, src.Origin, src.Path)
@@ -485,6 +528,14 @@ func fetchCommit(ctx context.Context, runner Runner, src Source) (string, error)
 	return sha, nil
 }
 
+// normOrigin puts an origin in the form ParseSource writes, so that a header
+// someone typed by hand is read as naming the repository it names. A trailing
+// slash is the difference a browser's address bar most readily introduces, and
+// every place an origin is compared or rebuilt has to agree on it: disagreeing
+// makes the same header refresh cleanly under one command and be refused as a
+// different model's by another.
+func normOrigin(o string) string { return strings.TrimSuffix(o, "/") }
+
 // escapePath escapes each segment of a repository path, leaving the separators
 // alone so the API still sees a path.
 func escapePath(p string) string {
@@ -520,7 +571,7 @@ func adoVersionType(src Source) string {
 // rather than taken from stdout: az rest appends a newline when it prints a
 // raw body to stdout, so the stdout form is not byte-identical to the origin
 // file — it drifts a trailing newline into the vendored copy and its digest
-// (ADR-0016). The --output-file form is the exact API response body.
+// (ADR-0019). The --output-file form is the exact API response body.
 func fetchContentADO(ctx context.Context, runner Runner, src Source) ([]byte, error) {
 	uri := fmt.Sprintf(
 		"https://dev.azure.com/%s/%s/_apis/git/repositories/%s/items?path=%s&versionDescriptor.version=%s&api-version=7.1",

@@ -11,9 +11,10 @@ diagram** in *crow's-foot* notation. It's a compact map of the nouns in the
 domain and how they connect. If you haven't read one before, this page is the
 key.
 
-The diagrams render automatically on GitHub and in the docs site (every fenced
-` ```mermaid ` block below is a live diagram). You never write this notation by
-hand — `modelith render` generates it from the `*.modelith.yaml`.
+GitHub renders the Mermaid blocks in committed Markdown, and this documentation
+site renders the live examples below. Other Markdown viewers may show the source
+instead. You never write this notation by hand: `modelith render` generates it
+from `*.modelith.yaml`.
 
 ## What the diagram shows (and what it doesn't)
 
@@ -43,6 +44,10 @@ diagram is the structure; the text is the detail.**
 
 The one exception is an entity related to *itself*, which appears as a row
 inside its own box — see [Self-relationships](#self-relationships-live-inside-the-box).
+A qualified relationship target from a direct import also appears as a node,
+labelled with its full `scope.Entity` name. It represents the external entity
+only; its attributes and relationships remain in the imported model's rendered
+document.
 
 ## The lines: relationships and cardinality
 
@@ -201,7 +206,9 @@ them in the text:
   `Owner`"* is an **invariant**, listed under the entity — not something the
   crow's foot captures.
 - **Attributes, derived values, and enums** are in the per-entity tables and the
-  Enums section.
+  Enums section. A qualified `subtypeOf` is the narrow exception: it appears as
+  a `subtypeOf "scope.Entity"` row in the local entity's Mermaid box because
+  Mermaid ER has no generalization edge.
 - **Actions** (what can be done to an entity, and which invariants they
   preserve) are listed per entity.
 
@@ -235,5 +242,7 @@ Reading it:
 - **the `Project self` row** — a `Project` optionally points at the archived
   `Project` it replaced, its `Predecessor`.
 
-To go deeper on the underlying fields, see the [Schema
-Reference](./06-schema-reference.md).
+## Related information
+
+- [Understand the model contents](./03-understanding-your-model.md).
+- [Review the diagram fields in the schema](./06-schema-reference.md#relationship).

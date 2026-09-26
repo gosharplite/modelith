@@ -56,29 +56,53 @@ var (
 type importedModel struct {
 	index int    // position in the importing model's imports list, for the finding path
 	path  string // the path as written in imports
-	model *model.Model
+	loadedImport
 }
 
-// runImports resolves the model's imports, checks every qualified attribute
-// type against them, and reports an import nothing references.
-//
-// modelPath is the path of the model being linted; imports resolve relative to
-// its directory. entityScopes are the scopes named by a cross-model reference
-// in an entity position (relationship.entity, subtypeOf) — unsupported there,
-// but still a real reference: an import bound to one of them is not also
-// reported as unreferenced (see reportQualifiedEntityRefs).
+// loadedImport is a contained import that was read successfully. model is set only
+// when the contents parsed as a supported domain model.
+type loadedImport struct {
+	resolvedPath string
+	source       []byte
+	model        *model.Model
+}
+
+type importLoadFailureKind uint8
+
+const (
+	importOutsideRepository importLoadFailureKind = iota + 1
+	importOutsideModelDirectory
+	importUnreadable
+	importNotDomainModel
+	importUnsupportedSchema
+)
+
+// importLoadFailure retains the data loadImports needs to preserve its
+// import-specific diagnostics.
+type importLoadFailure struct {
+	kind         importLoadFailureKind
+	resolvedPath string
+	err          error
+	version      string
+}
+
+// runImports resolves the model's imports, checks every qualified reference
+// against them, and reports an import nothing references.
 //
 // vendored says the model is a copy whose home is another repository, which
 // silences the errors its imports list would raise here (see loadImports).
-func runImports(modelPath string, m *model.Model, files Files, res *Result, entityScopes map[string]bool, vendored bool) {
+func runImports(modelPath string, m *model.Model, files Files, res *Result, vendored bool) {
 	byScope, claimed := loadImports(modelPath, m, files, res, vendored)
 	used := checkQualifiedTypes(m, byScope, claimed, res)
+	for scope := range checkQualifiedEntities(m, byScope, claimed, res) {
+		used[scope] = true
+	}
 	// An unreferenced import is a completeness finding, alongside the unused
 	// enum and the unused glossary term: vocabulary the model declares and
 	// nothing uses. Sharing their category means sharing their promotion under
 	// --completeness error.
 	for _, scope := range sortedMapKeys(byScope) {
-		if used[scope] || entityScopes[scope] {
+		if used[scope] {
 			continue
 		}
 		imp := byScope[scope]
@@ -113,7 +137,6 @@ func loadImports(modelPath string, m *model.Model, files Files, res *Result, ven
 	if len(m.Imports) == 0 {
 		return byScope, claimed
 	}
-	dir := filepath.Dir(modelPath)
 	root, inRepo := files.ResolutionRoot(modelPath)
 	for i, imp := range m.Imports {
 		reject := func(format string, args ...any) {
@@ -173,35 +196,56 @@ func loadImports(modelPath string, m *model.Model, files Files, res *Result, ven
 		// holds no model are four distinct diagnostics, and together they let a
 		// model from an untrusted source probe the filesystem of whatever runner
 		// lints it (ADR-0013).
-		joined := filepath.Join(dir, imp.Path)
-		if resolved := files.Resolve(joined); !withinRoot(root, resolved) {
-			if inRepo {
+		loaded, failure := loadImport(modelPath, root, inRepo, imp.Path, files)
+		if failure != nil {
+			switch failure.kind {
+			case importOutsideRepository:
 				reject("import %q resolves to %q, outside %q — that directory is the repository holding this model (the nearest ancestor with a .git entry), and an import may not name a file beyond it",
-					imp.Path, resolved, root)
-			} else {
+					imp.Path, failure.resolvedPath, root)
+			case importOutsideModelDirectory:
 				reject("import %q resolves to %q, outside %q — this model is in no repository, so resolution is confined to the directory holding it; move the imported model into that directory or below it",
-					imp.Path, resolved, root)
+					imp.Path, failure.resolvedPath, root)
+			case importUnreadable:
+				reject("import %q cannot be read: %v", imp.Path, failure.err)
+			case importNotDomainModel:
+				reject("import %q is not a domain model — lint it on its own with `modelith lint` to see why", imp.Path)
+			case importUnsupportedSchema:
+				reject("import %q declares schema version %q, which this modelith does not support: %s (upgrade modelith, or move that model to a supported version)",
+					imp.Path, failure.version, strings.Join(schema.SupportedVersions(), ", "))
 			}
 			continue
 		}
-		data, err := files.ReadFile(joined)
-		if err != nil {
-			reject("import %q cannot be read: %v", imp.Path, err)
-			continue
-		}
-		im, err := model.Parse(data)
-		if err != nil || im.Kind != "DomainModel" {
-			reject("import %q is not a domain model — lint it on its own with `modelith lint` to see why", imp.Path)
-			continue
-		}
-		if !schema.Supported(im.Version) {
-			reject("import %q declares schema version %q, which this modelith does not support: %s (upgrade modelith, or move that model to a supported version)",
-				imp.Path, im.Version, strings.Join(schema.SupportedVersions(), ", "))
-			continue
-		}
-		byScope[imp.Scope] = importedModel{index: i, path: imp.Path, model: im}
+		byScope[imp.Scope] = importedModel{index: i, path: imp.Path, loadedImport: loaded}
 	}
 	return byScope, claimed
+}
+
+// loadImport reads and validates an imported model after its path syntax and
+// scope have been checked by loadImports.
+func loadImport(modelPath, root string, inRepo bool, importPath string, files Files) (loadedImport, *importLoadFailure) {
+	joined := filepath.Join(filepath.Dir(modelPath), importPath)
+	resolvedPath := files.Resolve(joined)
+	if !withinRoot(root, resolvedPath) {
+		kind := importOutsideModelDirectory
+		if inRepo {
+			kind = importOutsideRepository
+		}
+		return loadedImport{}, &importLoadFailure{kind: kind, resolvedPath: resolvedPath}
+	}
+	data, err := files.ReadFile(joined)
+	if err != nil {
+		return loadedImport{}, &importLoadFailure{kind: importUnreadable, err: err}
+	}
+	loaded := loadedImport{resolvedPath: resolvedPath, source: data}
+	imported, err := model.Parse(data)
+	if err != nil || imported.Kind != "DomainModel" {
+		return loaded, &importLoadFailure{kind: importNotDomainModel}
+	}
+	if !schema.Supported(imported.Version) {
+		return loaded, &importLoadFailure{kind: importUnsupportedSchema, version: imported.Version}
+	}
+	loaded.model = imported
+	return loaded, nil
 }
 
 // checkQualifiedTypes resolves every qualified attribute type against the
@@ -279,6 +323,51 @@ func checkQualifiedTypes(m *model.Model, byScope map[string]importedModel, claim
 	return used
 }
 
+// checkQualifiedEntities resolves qualified relationship targets and subtype
+// parents against direct imports. Their imported semantics end at the boundary:
+// local reciprocity, ownership, and subtype traversal do not inspect that model.
+func checkQualifiedEntities(m *model.Model, byScope map[string]importedModel, claimed map[string]string, res *Result) map[string]bool {
+	used := map[string]bool{}
+	check := func(path, ref, kind string) {
+		match := qualifiedRefRE.FindStringSubmatch(ref)
+		if match == nil {
+			return
+		}
+		scope, item := match[1], match[2]
+		imp, ok := byScope[scope]
+		if !ok {
+			if _, listed := claimed[scope]; listed {
+				used[scope] = true
+				return
+			}
+			res.Findings = append(res.Findings, Finding{
+				Severity: SeverityError,
+				Category: CategorySemantic,
+				Path:     path,
+				Message:  fmt.Sprintf("%s %q references the scope %q, which no import binds — add the model that defines %s to `imports:`", kind, ref, scope, item),
+			})
+			return
+		}
+		used[scope] = true
+		if _, ok := imp.model.Entities[item]; !ok {
+			res.Findings = append(res.Findings, Finding{
+				Severity: SeverityError,
+				Category: CategorySemantic,
+				Path:     path,
+				Message:  fmt.Sprintf("%s %q names no entity %q in %q — check the name, or whether you meant to import a different model", kind, ref, item, imp.path),
+			})
+		}
+	}
+	for _, name := range m.EntityNames() {
+		ent := m.Entities[name]
+		check(fmt.Sprintf("/entities/%s/subtypeOf", name), ent.SubtypeOf, "subtype parent")
+		for i, rel := range ent.Relationships {
+			check(fmt.Sprintf("/entities/%s/relationships/%d/entity", name, i), rel.Entity, "relationship target")
+		}
+	}
+	return used
+}
+
 // unresolvedItemMessage explains a qualified type whose scope resolved but
 // whose item is not there.
 //
@@ -346,65 +435,4 @@ func malformedRefReason(typ string) string {
 	default:
 		return fmt.Sprintf("the item name %q is not PascalCase", item)
 	}
-}
-
-// reportQualifiedEntityRefs reports a cross-model reference in an entity
-// position — relationship.entity or subtypeOf. It returns the instance paths
-// it reported, so the schema's own finding for the same value is suppressed,
-// and the scopes those references named, so an import that exists to support
-// one of them is not also reported as unreferenced (runImports) even though no
-// attribute type resolves it.
-//
-// Both fields carry pattern ^[A-Z][A-Za-z0-9]+$, so "payments.Card" already
-// fails validation with a message about a pattern. This says what is actually
-// wrong, in the spirit of the unsupported-version check. Cross-model entity
-// references are deferred, not planned against: ADR-0010 records why.
-func reportQualifiedEntityRefs(inst any, res *Result) (reported map[string]bool, scopes map[string]bool) {
-	reported = map[string]bool{}
-	scopes = map[string]bool{}
-	doc, ok := inst.(map[string]any)
-	if !ok {
-		return reported, scopes
-	}
-	entities, ok := doc["entities"].(map[string]any)
-	if !ok {
-		return reported, scopes
-	}
-	report := func(path, value string) {
-		reported[path] = true
-		scope, _, _ := strings.Cut(value, ".")
-		scopes[scope] = true
-		res.Findings = append(res.Findings, Finding{
-			Severity: SeverityError,
-			Category: CategoryStructural,
-			Path:     path,
-			Message: fmt.Sprintf(
-				"%q is a cross-model reference, which is not supported in an entity position — only an attribute `type` can be qualified as scope.Name",
-				value,
-			),
-		})
-	}
-	for _, name := range sortedMapKeys(entities) {
-		ent, ok := entities[name].(map[string]any)
-		if !ok {
-			continue
-		}
-		if parent, ok := ent["subtypeOf"].(string); ok && qualifiedRefRE.MatchString(parent) {
-			report(fmt.Sprintf("/entities/%s/subtypeOf", name), parent)
-		}
-		rels, ok := ent["relationships"].([]any)
-		if !ok {
-			continue
-		}
-		for i, r := range rels {
-			rel, ok := r.(map[string]any)
-			if !ok {
-				continue
-			}
-			if target, ok := rel["entity"].(string); ok && qualifiedRefRE.MatchString(target) {
-				report(fmt.Sprintf("/entities/%s/relationships/%d/entity", name, i), target)
-			}
-		}
-	}
-	return reported, scopes
 }
