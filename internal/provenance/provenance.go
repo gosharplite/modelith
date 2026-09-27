@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -49,7 +50,9 @@ type Header struct {
 	// written before this key existed still parses, and a GitHub header keeps
 	// its shape. It is also omitted when the type is not known, which the layer
 	// that fetches then resolves; there is no value meaning "let the origin
-	// decide", because the Azure DevOps API does not.
+	// decide", because the Azure DevOps API does not. Because only such a host
+	// needs the key, a ref-type on any other origin is a defect validate reports
+	// (see refTypeHost), not a value to ignore.
 	RefType  string
 	Commit   string
 	Imported string
@@ -62,6 +65,16 @@ type Header struct {
 // be a claim the API does not honour. An unknown type is *omitted*, and the
 // layer that fetches resolves it.
 var refTypes = []string{"branch", "tag", "commit"}
+
+// refTypeHost is the one origin host that records a ref type. A version on
+// Azure DevOps carries a *type* alongside its value and the API does not infer
+// one (an untyped request is read as a branch), so an ADO import records the
+// key. A host whose API resolves an untyped ref on its own — GitHub — has no use
+// for it, and its header is kept free of the key so a copy written before the
+// key existed stays byte-identical to one written now (ADR-0019). The set is
+// closed: like an unknown fetch method, a ref-type on any other host is a
+// defect, not a value to ignore.
+const refTypeHost = "dev.azure.com"
 
 // keyOrder is the order Format writes the keys in, and the set of keys that
 // exist at all: a line naming anything else is a Problem.
@@ -225,7 +238,30 @@ func (h *Header) validate(seen map[string]int) []Problem {
 		problems = append(problems, Problem{seen["ref-type"], fmt.Sprintf(
 			"provenance ref-type %q is not one of %s", h.RefType, quotedList(refTypes))})
 	}
+	// The key is recorded only for a host whose API makes it necessary, so it is
+	// a defect on any other origin — including GitHub, whose header must not gain
+	// it. Guarded on a present origin so a header that is already missing one is
+	// not reported twice.
+	if h.RefType != "" && h.Origin != "" && originHost(h.Origin) != refTypeHost {
+		problems = append(problems, Problem{seen["ref-type"], fmt.Sprintf(
+			"provenance ref-type %q is recorded only for a %s origin, and this file's origin is %q — a host whose API resolves an untyped ref on its own carries no ref-type key; remove the line",
+			h.RefType, refTypeHost, h.Origin)})
+	}
 	return problems
+}
+
+// originHost returns the host an origin URL names, in the form a comparison
+// uses: lowercased and with a leading "www." removed, because a host is
+// case-insensitive and a browser hands back the "www." form of a site as
+// readily as the bare one. It mirrors the normalization ParseSource dispatches
+// on, so both agree on which host an origin names. It returns "" when the origin
+// does not parse or names no host.
+func originHost(origin string) string {
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ToLower(u.Host), "www.")
 }
 
 // ValidDigest reports whether s is a digest in the form a header records. A

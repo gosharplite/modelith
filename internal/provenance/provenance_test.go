@@ -9,10 +9,14 @@ import (
 
 // vendored is a stamped file: the editor directive, then the header, then a
 // model. Tests that need the unstamped content use plain.
+//
+// Its origin is Azure DevOps, the one host whose header records a ref type, so
+// the fixture is a header that can actually occur. A GitHub origin with the key
+// is a defect the validator reports (see the ADR-0019 test below).
 const vendored = `# yaml-language-server: $schema=https://modelith.sh/schema/domain-model/v1.json
 # modelith-vendored: DO NOT EDIT — this file is a copy. Change it at its origin.
 # modelith-fetch: git
-# modelith-origin: https://github.com/stacklok/some-repo
+# modelith-origin: https://dev.azure.com/myorg/myproject/_git/myrepo
 # modelith-path: docs/payments.modelith.yaml
 # modelith-ref: main
 # modelith-ref-type: branch
@@ -65,7 +69,7 @@ func TestParse_Valid(t *testing.T) {
 	want := Header{
 		Vendored: Banner,
 		Fetch:    "git",
-		Origin:   "https://github.com/stacklok/some-repo",
+		Origin:   "https://dev.azure.com/myorg/myproject/_git/myrepo",
 		Path:     "docs/payments.modelith.yaml",
 		Ref:      "main",
 		RefType:  "branch",
@@ -99,7 +103,7 @@ func TestParse_Problems(t *testing.T) {
 			value := map[string]string{
 				"vendored": Banner,
 				"fetch":    "git",
-				"origin":   "https://github.com/stacklok/some-repo",
+				"origin":   "https://dev.azure.com/myorg/myproject/_git/myrepo",
 				"path":     "docs/payments.modelith.yaml",
 				"ref":      "main",
 				"ref-type": "branch",
@@ -241,6 +245,47 @@ func TestADR_0015_UnknownFetchMethodIsAnError(t *testing.T) {
 }
 
 const issuesHint = "https://github.com/stacklok/modelith/issues"
+
+// TestADR_0019_RefTypeIsOnlyValidOnAnADOOrigin pins the other half of the
+// ADR-0019 header rule — the half that lives on the reading side. The key is
+// recorded only for Azure DevOps, whose API needs the type; GitHub's does not,
+// so a header that carries the key on a GitHub (or any other) origin is a
+// defect, not a value to ignore. Before this, such a header parsed clean and
+// `deps update` silently dropped the key.
+func TestADR_0019_RefTypeIsOnlyValidOnAnADOOrigin(t *testing.T) {
+	t.Parallel()
+
+	// A valid file is the fixture itself. Everything else differs from it in
+	// exactly one way.
+	if _, problems := Parse([]byte(vendored)); len(problems) != 0 {
+		t.Fatalf("the ADO fixture is not valid: %+v", problems)
+	}
+
+	github := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://github.com/acme/billing", 1)
+	_, problems := Parse([]byte(github))
+	var found *Problem
+	for i := range problems {
+		if strings.Contains(problems[i].Message, "recorded only for a dev.azure.com origin") {
+			found = &problems[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("a GitHub origin carrying a ref-type parsed clean; want a problem, got %+v", problems)
+	}
+	if !strings.Contains(found.Message, `"https://github.com/acme/billing"`) {
+		t.Errorf("the problem does not name the origin it read: %s", found.Message)
+	}
+	if found.Line == 0 {
+		t.Errorf("the problem does not point at the ref-type line: %+v", found)
+	}
+
+	// And the key is still optional: a GitHub header without it stays valid,
+	// which is what keeps a pre-existing GitHub copy byte-identical.
+	noKey := strings.Replace(github, LinePrefix+"ref-type: branch\n", "", 1)
+	if _, problems := Parse([]byte(noKey)); len(problems) != 0 {
+		t.Errorf("a GitHub header without a ref-type was rejected: %+v", problems)
+	}
+}
 
 func TestDigest_ChangesWithTheContent(t *testing.T) {
 	t.Parallel()
