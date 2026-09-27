@@ -242,7 +242,7 @@ func (h *Header) validate(seen map[string]int) []Problem {
 	// a defect on any other origin — including GitHub, whose header must not gain
 	// it. Guarded on a present origin so a header that is already missing one is
 	// not reported twice.
-	if h.RefType != "" && h.Origin != "" && originHost(h.Origin) != refTypeHost {
+	if h.RefType != "" && h.Origin != "" && OriginHost(h.Origin) != refTypeHost {
 		problems = append(problems, Problem{seen["ref-type"], fmt.Sprintf(
 			"provenance ref-type %q is recorded only for a %s origin, and this file's origin is %q — a host whose API resolves an untyped ref on its own carries no ref-type key; remove the line",
 			h.RefType, refTypeHost, h.Origin)})
@@ -250,19 +250,27 @@ func (h *Header) validate(seen map[string]int) []Problem {
 	return problems
 }
 
-// originHost returns the host an origin URL names, in the form a comparison
-// uses: lowercased, with any port dropped, and with a leading "www." removed,
-// because a host is case-insensitive, a port is not part of the host, and a
-// browser hands back the "www." form of a site as readily as the bare one. It
-// mirrors the normalization ParseSource dispatches on, so both agree on which
-// host an origin names. It returns "" when the origin does not parse or names no
-// host.
-func originHost(origin string) string {
+// NormalizeHost returns the form a host comparison uses: lowercased and with
+// a leading "www." removed. A port is not part of a host, so callers pass one
+// that url.URL.Hostname has already stripped.
+func NormalizeHost(host string) string {
+	return strings.TrimPrefix(strings.ToLower(host), "www.")
+}
+
+// OriginHost returns the normalized host an origin URL names, or "" when the
+// origin does not parse or names no host. It is the single source of truth
+// for "which host does this origin name", shared by the provenance validator
+// and the deps transport so the two cannot disagree.
+//
+// It normalizes through url.URL.Hostname, which drops any explicit port: a port
+// is not part of the host, so https://dev.azure.com:443/... names the same host
+// as https://dev.azure.com/... — a host comparison must read them as equal.
+func OriginHost(origin string) string {
 	u, err := url.Parse(strings.TrimSpace(origin))
 	if err != nil {
 		return ""
 	}
-	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	return NormalizeHost(u.Hostname())
 }
 
 // ValidDigest reports whether s is a digest in the form a header records. A

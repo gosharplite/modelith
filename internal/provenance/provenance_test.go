@@ -63,9 +63,18 @@ func TestParse_Valid(t *testing.T) {
 	t.Parallel()
 
 	// A GitHub header must not carry the ref-type key (ADR-0019), so the second
-	// shape is the fixture with a GitHub origin and the line dropped.
-	github := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://github.com/stacklok/some-repo", 1)
-	github = strings.Replace(github, LinePrefix+"ref-type: branch\n", "", 1)
+	// shape is the fixture with a GitHub origin and the line dropped. Each step
+	// is checked to have changed the string: a future fixture edit that stopped
+	// one of them matching would leave this case a silent duplicate of the ADO
+	// one, and the test would keep passing while covering nothing.
+	withGitHubOrigin := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://github.com/stacklok/some-repo", 1)
+	if withGitHubOrigin == vendored {
+		t.Fatal("the test did not rewrite the origin, so the GitHub case would duplicate the ADO one")
+	}
+	github := strings.Replace(withGitHubOrigin, LinePrefix+"ref-type: branch\n", "", 1)
+	if github == withGitHubOrigin {
+		t.Fatal("the test did not drop the ref-type line, so the GitHub case would duplicate the ADO one")
+	}
 
 	cases := []struct {
 		name string
@@ -326,13 +335,49 @@ func TestADR_0019_RefTypeIsOnlyValidOnAnADOOrigin(t *testing.T) {
 
 	// An ADO origin may name its port explicitly, and the port is not part of
 	// the host: the same origin with and without one must be read as the same
-	// host, so a valid ADO header carrying a port is not a false positive.
+	// host, so a valid ADO header carrying a port parses clean.
 	ported := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://dev.azure.com:443/myorg/myproject/_git/myrepo", 1)
-	_, problems = Parse([]byte(ported))
-	for _, p := range problems {
-		if strings.Contains(p.Message, "recorded only for") {
-			t.Errorf("an ADO origin carrying an explicit port was rejected: %s", p.Message)
-		}
+	if ported == vendored {
+		t.Fatal("the test did not rewrite the origin to carry a port")
+	}
+	if _, problems := Parse([]byte(ported)); len(problems) != 0 {
+		t.Fatalf("an ADO origin carrying an explicit port was rejected: %+v", problems)
+	}
+}
+
+// TestOriginHost pins the normalizer the provenance validator and the deps
+// transport share. A host is case-insensitive and may carry a leading "www.";
+// a port is not part of the host, so an origin written with an explicit one
+// names the same site as the one without — which is what keeps `modelith lint`
+// and `modelith deps check` from disagreeing about a hand-written origin.
+func TestOriginHost(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		origin string
+		want   string
+	}{
+		{"a bare ADO origin", "https://dev.azure.com/myorg/x", "dev.azure.com"},
+		{"an explicit port is dropped", "https://dev.azure.com:443/myorg/x", "dev.azure.com"},
+		{"a non-default port is dropped too", "https://dev.azure.com:8443/myorg/x", "dev.azure.com"},
+		{"case and the www prefix are normalized away", "https://WWW.GitHub.com/a/b", "github.com"},
+		{"the plain GitHub origin", "https://github.com/a/b", "github.com"},
+		{"a value that parses as a URL with no host", "/just/a/path", ""},
+		{"a value that does not parse as a URL names no host", "not a url", ""},
+		{"the empty string names no host", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := OriginHost(tc.origin); got != tc.want {
+				t.Errorf("OriginHost(%q) = %q, want %q", tc.origin, got, tc.want)
+			}
+		})
+	}
+
+	if got := NormalizeHost("Dev.Azure.com"); got != "dev.azure.com" {
+		t.Errorf("NormalizeHost(%q) = %q, want %q", "Dev.Azure.com", got, "dev.azure.com")
 	}
 }
 
