@@ -62,23 +62,61 @@ func TestPresent(t *testing.T) {
 func TestParse_Valid(t *testing.T) {
 	t.Parallel()
 
-	h, problems := Parse([]byte(vendored))
-	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %+v", problems)
+	// A GitHub header must not carry the ref-type key (ADR-0019), so the second
+	// shape is the fixture with a GitHub origin and the line dropped.
+	github := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://github.com/stacklok/some-repo", 1)
+	github = strings.Replace(github, LinePrefix+"ref-type: branch\n", "", 1)
+
+	cases := []struct {
+		name string
+		src  string
+		want Header
+	}{
+		{
+			name: "an Azure DevOps header",
+			src:  vendored,
+			want: Header{
+				Vendored: Banner,
+				Fetch:    "git",
+				Origin:   "https://dev.azure.com/myorg/myproject/_git/myrepo",
+				Path:     "docs/payments.modelith.yaml",
+				Ref:      "main",
+				RefType:  "branch",
+				Commit:   "4f2c1e9c8b3ad0e5f71b2c9a6d4e8f30ab5c7d21",
+				Imported: "2026-07-27",
+				Digest:   "sha256:" + strings.Repeat("0", 64),
+			},
+		},
+		{
+			name: "a GitHub header",
+			src:  github,
+			want: Header{
+				Vendored: Banner,
+				Fetch:    "git",
+				Origin:   "https://github.com/stacklok/some-repo",
+				Path:     "docs/payments.modelith.yaml",
+				Ref:      "main",
+				Commit:   "4f2c1e9c8b3ad0e5f71b2c9a6d4e8f30ab5c7d21",
+				Imported: "2026-07-27",
+				Digest:   "sha256:" + strings.Repeat("0", 64),
+			},
+		},
 	}
-	want := Header{
-		Vendored: Banner,
-		Fetch:    "git",
-		Origin:   "https://dev.azure.com/myorg/myproject/_git/myrepo",
-		Path:     "docs/payments.modelith.yaml",
-		Ref:      "main",
-		RefType:  "branch",
-		Commit:   "4f2c1e9c8b3ad0e5f71b2c9a6d4e8f30ab5c7d21",
-		Imported: "2026-07-27",
-		Digest:   "sha256:" + strings.Repeat("0", 64),
-	}
-	if *h != want {
-		t.Errorf("Parse() = %+v, want %+v", *h, want)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, problems := Parse([]byte(tc.src))
+			if len(problems) != 0 {
+				t.Fatalf("unexpected problems: %+v", problems)
+			}
+			if h == nil {
+				t.Fatal("Parse returned no header")
+			}
+			if *h != tc.want {
+				t.Errorf("Parse() = %+v, want %+v", *h, tc.want)
+			}
+		})
 	}
 }
 
@@ -284,6 +322,17 @@ func TestADR_0019_RefTypeIsOnlyValidOnAnADOOrigin(t *testing.T) {
 	noKey := strings.Replace(github, LinePrefix+"ref-type: branch\n", "", 1)
 	if _, problems := Parse([]byte(noKey)); len(problems) != 0 {
 		t.Errorf("a GitHub header without a ref-type was rejected: %+v", problems)
+	}
+
+	// An ADO origin may name its port explicitly, and the port is not part of
+	// the host: the same origin with and without one must be read as the same
+	// host, so a valid ADO header carrying a port is not a false positive.
+	ported := strings.Replace(vendored, "https://dev.azure.com/myorg/myproject/_git/myrepo", "https://dev.azure.com:443/myorg/myproject/_git/myrepo", 1)
+	_, problems = Parse([]byte(ported))
+	for _, p := range problems {
+		if strings.Contains(p.Message, "recorded only for") {
+			t.Errorf("an ADO origin carrying an explicit port was rejected: %s", p.Message)
+		}
 	}
 }
 

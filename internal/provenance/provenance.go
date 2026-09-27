@@ -251,17 +251,18 @@ func (h *Header) validate(seen map[string]int) []Problem {
 }
 
 // originHost returns the host an origin URL names, in the form a comparison
-// uses: lowercased and with a leading "www." removed, because a host is
-// case-insensitive and a browser hands back the "www." form of a site as
-// readily as the bare one. It mirrors the normalization ParseSource dispatches
-// on, so both agree on which host an origin names. It returns "" when the origin
-// does not parse or names no host.
+// uses: lowercased, with any port dropped, and with a leading "www." removed,
+// because a host is case-insensitive, a port is not part of the host, and a
+// browser hands back the "www." form of a site as readily as the bare one. It
+// mirrors the normalization ParseSource dispatches on, so both agree on which
+// host an origin names. It returns "" when the origin does not parse or names no
+// host.
 func originHost(origin string) string {
 	u, err := url.Parse(strings.TrimSpace(origin))
 	if err != nil {
 		return ""
 	}
-	return strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 }
 
 // ValidDigest reports whether s is a digest in the form a header records. A
